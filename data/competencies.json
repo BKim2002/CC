@@ -1,0 +1,1666 @@
+{
+  "schema_version": "1.0",
+  "source": {
+    "file": "competency-definitions 1.md",
+    "sha256": "c02d7faa13b1fb56db122c2d1d332b3e45935a3ae3d8d83f415def4146a0946b",
+    "encoding": "utf-8"
+  },
+  "rules": {
+    "written_analysis_unit": "Level 3 하위요인 30개",
+    "level_4": "정의와 데이터 컬럼은 보존하되 분석 변수에서는 제외",
+    "video_interview": "필기 역량검사와 별도의 도구이며 competency score_cols에서 제외"
+  },
+  "validation": {
+    "status": "passed",
+    "counts": {
+      "written_overall": 1,
+      "written_L1": 3,
+      "written_L2": 10,
+      "written_L3": 30,
+      "written_L4": 9,
+      "video_factor": 3,
+      "video_item": 6,
+      "total": 62
+    }
+  },
+  "items": [
+    {
+      "id": "written:overall:역검 종합점수",
+      "name": "역검 종합점수",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "overall",
+      "path": [
+        "역검 종합점수"
+      ],
+      "parent_name": null,
+      "parent_id": null,
+      "children": [
+        "성과 예측",
+        "관계 예측",
+        "적응 예측"
+      ],
+      "children_ids": [
+        "written:l1:성과 예측",
+        "written:l1:관계 예측",
+        "written:l1:적응 예측"
+      ],
+      "definition": "전체 통합 점수",
+      "definition_status": "summary",
+      "analysis_included": false,
+      "notes": [
+        "원본 문서는 종합점수를 '전체 통합 점수'로 요약한다.",
+        "분석 변수는 Level 3 하위요인 30개를 사용한다."
+      ],
+      "source_section": "위계 구조 (5단계)"
+    },
+    {
+      "id": "written:l1:성과 예측",
+      "name": "성과 예측",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L1",
+      "path": [
+        "역검 종합점수",
+        "성과 예측"
+      ],
+      "parent_name": "역검 종합점수",
+      "parent_id": "written:overall:역검 종합점수",
+      "children": [
+        "긍정성",
+        "적극성",
+        "성실성",
+        "전략성"
+      ],
+      "children_ids": [
+        "written:l2:긍정성",
+        "written:l2:적극성",
+        "written:l2:성실성",
+        "written:l2:전략성"
+      ],
+      "definition": null,
+      "definition_status": "not_provided",
+      "analysis_included": false,
+      "notes": [
+        "원본 문서에는 이 Level 1 상위요인의 독립적인 정의 문장이 없다.",
+        "소속 Level 2 중위요인을 통해 구성 범위를 설명해야 한다."
+      ],
+      "source_section": "위계 구조 (5단계)"
+    },
+    {
+      "id": "written:l1:관계 예측",
+      "name": "관계 예측",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L1",
+      "path": [
+        "역검 종합점수",
+        "관계 예측"
+      ],
+      "parent_name": "역검 종합점수",
+      "parent_id": "written:overall:역검 종합점수",
+      "children": [
+        "사회성",
+        "정체성",
+        "관계성"
+      ],
+      "children_ids": [
+        "written:l2:사회성",
+        "written:l2:정체성",
+        "written:l2:관계성"
+      ],
+      "definition": null,
+      "definition_status": "not_provided",
+      "analysis_included": false,
+      "notes": [
+        "원본 문서에는 이 Level 1 상위요인의 독립적인 정의 문장이 없다.",
+        "소속 Level 2 중위요인을 통해 구성 범위를 설명해야 한다."
+      ],
+      "source_section": "위계 구조 (5단계)"
+    },
+    {
+      "id": "written:l1:적응 예측",
+      "name": "적응 예측",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L1",
+      "path": [
+        "역검 종합점수",
+        "적응 예측"
+      ],
+      "parent_name": "역검 종합점수",
+      "parent_id": "written:overall:역검 종합점수",
+      "children": [
+        "객관성",
+        "비활성",
+        "과활성"
+      ],
+      "children_ids": [
+        "written:l2:객관성",
+        "written:l2:비활성",
+        "written:l2:과활성"
+      ],
+      "definition": null,
+      "definition_status": "not_provided",
+      "analysis_included": false,
+      "notes": [
+        "원본 문서에는 이 Level 1 상위요인의 독립적인 정의 문장이 없다.",
+        "소속 Level 2 중위요인을 통해 구성 범위를 설명해야 한다."
+      ],
+      "source_section": "위계 구조 (5단계)"
+    },
+    {
+      "id": "written:l2:긍정성",
+      "name": "긍정성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "긍정성"
+      ],
+      "parent_name": "성과 예측",
+      "parent_id": "written:l1:성과 예측",
+      "children": [
+        "자기긍정",
+        "기회긍정",
+        "환경긍정"
+      ],
+      "children_ids": [
+        "written:l3:자기긍정",
+        "written:l3:기회긍정",
+        "written:l3:환경긍정"
+      ],
+      "definition": "주어진 자극을 긍정적으로 해석하여 접근하는 성향",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:자기긍정",
+      "name": "자기긍정",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "긍정성",
+        "자기긍정"
+      ],
+      "parent_name": "긍정성",
+      "parent_id": "written:l2:긍정성",
+      "children": [],
+      "children_ids": [],
+      "definition": "자신의 자율적 행동 가능성을 높게 지각하여 스스로 원하는 수준의 성과를 거둘 수 있다고 믿는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:기회긍정",
+      "name": "기회긍정",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "긍정성",
+        "기회긍정"
+      ],
+      "parent_name": "긍정성",
+      "parent_id": "written:l2:긍정성",
+      "children": [],
+      "children_ids": [],
+      "definition": "새로운 기회에 빠르게 반응 및 접근하고 기회에서 주어지는 보상을 적극적으로 얻고자 하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:환경긍정",
+      "name": "환경긍정",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "긍정성",
+        "환경긍정"
+      ],
+      "parent_name": "긍정성",
+      "parent_id": "written:l2:긍정성",
+      "children": [],
+      "children_ids": [],
+      "definition": "주변 환경(상황/관계)에 대한 긍정적 해석과 더불어 환경에 대해 개선 가능성을 높게 지각하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l2:적극성",
+      "name": "적극성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "적극성"
+      ],
+      "parent_name": "성과 예측",
+      "parent_id": "written:l1:성과 예측",
+      "children": [
+        "성취추구",
+        "인정추구",
+        "성장추구"
+      ],
+      "children_ids": [
+        "written:l3:성취추구",
+        "written:l3:인정추구",
+        "written:l3:성장추구"
+      ],
+      "definition": "자신의 성취와 성장을 위해 강한 의지와 열망을 가진 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:성취추구",
+      "name": "성취추구",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "적극성",
+        "성취추구"
+      ],
+      "parent_name": "적극성",
+      "parent_id": "written:l2:적극성",
+      "children": [],
+      "children_ids": [],
+      "definition": "가시적이고 물질적인 보상과 성취를 추구하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:인정추구",
+      "name": "인정추구",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "적극성",
+        "인정추구"
+      ],
+      "parent_name": "적극성",
+      "parent_id": "written:l2:적극성",
+      "children": [],
+      "children_ids": [],
+      "definition": "사회적인 칭찬이나 인정을 추구하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:성장추구",
+      "name": "성장추구",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "적극성",
+        "성장추구"
+      ],
+      "parent_name": "적극성",
+      "parent_id": "written:l2:적극성",
+      "children": [],
+      "children_ids": [],
+      "definition": "내면의 성장과 만족감을 추구하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l2:성실성",
+      "name": "성실성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "성실성"
+      ],
+      "parent_name": "성과 예측",
+      "parent_id": "written:l1:성과 예측",
+      "children": [
+        "점검행동",
+        "조절행동",
+        "유지행동"
+      ],
+      "children_ids": [
+        "written:l3:점검행동",
+        "written:l3:조절행동",
+        "written:l3:유지행동"
+      ],
+      "definition": "목표 달성을 위한 행동을 점검, 조절, 유지하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:점검행동",
+      "name": "점검행동",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "성실성",
+        "점검행동"
+      ],
+      "parent_name": "성실성",
+      "parent_id": "written:l2:성실성",
+      "children": [],
+      "children_ids": [],
+      "definition": "자신의 행동이 목적에 부합하는지 끊임없이 점검하고 모니터링하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:조절행동",
+      "name": "조절행동",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "성실성",
+        "조절행동"
+      ],
+      "parent_name": "성실성",
+      "parent_id": "written:l2:성실성",
+      "children": [],
+      "children_ids": [],
+      "definition": "상황에 맞게 자신의 행동이나 감정을 유연하게 조절하고 적응하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l3:유지행동",
+      "name": "유지행동",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "성실성",
+        "유지행동"
+      ],
+      "parent_name": "성실성",
+      "parent_id": "written:l2:성실성",
+      "children": [],
+      "children_ids": [],
+      "definition": "목표 달성을 위해 꾸준하고 끈기 있게 업무를 수행하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "성과 예측"
+    },
+    {
+      "id": "written:l2:전략성",
+      "name": "전략성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성"
+      ],
+      "parent_name": "성과 예측",
+      "parent_id": "written:l1:성과 예측",
+      "children": [
+        "기억력",
+        "인지력",
+        "분석력"
+      ],
+      "children_ids": [
+        "written:l3:기억력",
+        "written:l3:인지력",
+        "written:l3:분석력"
+      ],
+      "definition": "목표를 달성하는 데에 필요한 핵심변수를 파악하고, 효과적이고 효율적인 전략과 실행계획을 수립할 수 있는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l3:기억력",
+      "name": "기억력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "기억력"
+      ],
+      "parent_name": "전략성",
+      "parent_id": "written:l2:전략성",
+      "children": [
+        "작업기억",
+        "정보처리",
+        "메타인지"
+      ],
+      "children_ids": [
+        "written:l4:작업기억",
+        "written:l4:정보처리",
+        "written:l4:메타인지"
+      ],
+      "definition": "기억을 얼마나 선명하게, 많이, 오랫동안 할 수 있는지에 대한 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [
+        "전략성의 Level 3 집계 항목으로 분석 변수에 직접 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:작업기억",
+      "name": "작업기억",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "기억력",
+        "작업기억"
+      ],
+      "parent_name": "기억력",
+      "parent_id": "written:l3:기억력",
+      "children": [],
+      "children_ids": [],
+      "definition": "경험한 자극물을 기억하고 인출하여 목표에 맞게 계획하고 수행하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:정보처리",
+      "name": "정보처리",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "기억력",
+        "정보처리"
+      ],
+      "parent_name": "기억력",
+      "parent_id": "written:l3:기억력",
+      "children": [],
+      "children_ids": [],
+      "definition": "새로운 정보들을 빠르게 받아들이고 기존 정보와 조합하여 효과적으로 활용하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:메타인지",
+      "name": "메타인지",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "기억력",
+        "메타인지"
+      ],
+      "parent_name": "기억력",
+      "parent_id": "written:l3:기억력",
+      "children": [],
+      "children_ids": [],
+      "definition": "자신의 인지적 활동에 대해서 객관적으로 잘 파악하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l3:인지력",
+      "name": "인지력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "인지력"
+      ],
+      "parent_name": "전략성",
+      "parent_id": "written:l2:전략성",
+      "children": [
+        "주의전환",
+        "인지제어",
+        "수인지력"
+      ],
+      "children_ids": [
+        "written:l4:주의전환",
+        "written:l4:인지제어",
+        "written:l4:수인지력"
+      ],
+      "definition": "주의를 효율적으로 전환하고 인지 자원을 통제하여 정보를 처리하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [
+        "전략성의 Level 3 집계 항목으로 분석 변수에 직접 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:주의전환",
+      "name": "주의전환",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "인지력",
+        "주의전환"
+      ],
+      "parent_name": "인지력",
+      "parent_id": "written:l3:인지력",
+      "children": [],
+      "children_ids": [],
+      "definition": "서로 다른 종류의 일을 전환하여 효율적으로 일을 처리하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:인지제어",
+      "name": "인지제어",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "인지력",
+        "인지제어"
+      ],
+      "parent_name": "인지력",
+      "parent_id": "written:l3:인지력",
+      "children": [],
+      "children_ids": [],
+      "definition": "불필요한 정보나 간섭을 억제하고 목표에 부합하는 정보에 집중하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:수인지력",
+      "name": "수인지력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "인지력",
+        "수인지력"
+      ],
+      "parent_name": "인지력",
+      "parent_id": "written:l3:인지력",
+      "children": [],
+      "children_ids": [],
+      "definition": "수의 많음, 적음을 빠르고 정확하게 파악하는 수에 대한 직관적 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l3:분석력",
+      "name": "분석력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "분석력"
+      ],
+      "parent_name": "전략성",
+      "parent_id": "written:l2:전략성",
+      "children": [
+        "계획능력",
+        "공간지각",
+        "학습능력"
+      ],
+      "children_ids": [
+        "written:l4:계획능력",
+        "written:l4:공간지각",
+        "written:l4:학습능력"
+      ],
+      "definition": "목표 달성을 위한 계획 수립과 공간·학습 정보를 효과적으로 활용하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [
+        "전략성의 Level 3 집계 항목으로 분석 변수에 직접 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:계획능력",
+      "name": "계획능력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "분석력",
+        "계획능력"
+      ],
+      "parent_name": "분석력",
+      "parent_id": "written:l3:분석력",
+      "children": [],
+      "children_ids": [],
+      "definition": "목표 달성을 위해 여러 변수를 상상하고 추측하여 계획을 수립하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:공간지각",
+      "name": "공간지각",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "분석력",
+        "공간지각"
+      ],
+      "parent_name": "분석력",
+      "parent_id": "written:l3:분석력",
+      "children": [],
+      "children_ids": [],
+      "definition": "공간에 대한 기억과 인출을 수행하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l4:학습능력",
+      "name": "학습능력",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L4",
+      "path": [
+        "역검 종합점수",
+        "성과 예측",
+        "전략성",
+        "분석력",
+        "학습능력"
+      ],
+      "parent_name": "분석력",
+      "parent_id": "written:l3:분석력",
+      "children": [],
+      "children_ids": [],
+      "definition": "새로운 정보를 빠르게 습득하여 다양한 상황에 적용하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "Level 4 최하위요인으로, 분석 변수에는 직접 사용하지 않는다.",
+        "상위 Level 3 집계 항목을 분석 단위로 사용한다."
+      ],
+      "source_section": "성과 예측 > 전략성"
+    },
+    {
+      "id": "written:l2:사회성",
+      "name": "사회성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "사회성"
+      ],
+      "parent_name": "관계 예측",
+      "parent_id": "written:l1:관계 예측",
+      "children": [
+        "감정인식",
+        "맥락이해",
+        "관계대응"
+      ],
+      "children_ids": [
+        "written:l3:감정인식",
+        "written:l3:맥락이해",
+        "written:l3:관계대응"
+      ],
+      "definition": "성과 창출을 위해 대상(상대방, 상황 등)의 상태를 파악하고 적절하게 사고/행동하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:감정인식",
+      "name": "감정인식",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "사회성",
+        "감정인식"
+      ],
+      "parent_name": "사회성",
+      "parent_id": "written:l2:사회성",
+      "children": [],
+      "children_ids": [],
+      "definition": "타인의 언어, 표정, 몸짓 등 외적인 단서로부터 타인의 정서를 읽고 이해하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:맥락이해",
+      "name": "맥락이해",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "사회성",
+        "맥락이해"
+      ],
+      "parent_name": "사회성",
+      "parent_id": "written:l2:사회성",
+      "children": [],
+      "children_ids": [],
+      "definition": "상황 또는 사람들의 관찰하기 힘든 부분을 정확하게 추론하는 능력. 감정, 정서, 기분 뿐만이 아닌 의도나 상황의 흐름 등을 이해하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:관계대응",
+      "name": "관계대응",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "사회성",
+        "관계대응"
+      ],
+      "parent_name": "사회성",
+      "parent_id": "written:l2:사회성",
+      "children": [],
+      "children_ids": [],
+      "definition": "목표 달성을 위해 상황에 맞게 상대방에게 적절하게 감정, 생각, 그리고 행동 등을 표현하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l2:정체성",
+      "name": "정체성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "정체성"
+      ],
+      "parent_name": "관계 예측",
+      "parent_id": "written:l1:관계 예측",
+      "children": [
+        "성찰성",
+        "수용성",
+        "능동성"
+      ],
+      "children_ids": [
+        "written:l3:성찰성",
+        "written:l3:수용성",
+        "written:l3:능동성"
+      ],
+      "definition": "자신과 상대방에 대해 객관적으로 이해하고 주도적으로 행동하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:성찰성",
+      "name": "성찰성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "정체성",
+        "성찰성"
+      ],
+      "parent_name": "정체성",
+      "parent_id": "written:l2:정체성",
+      "children": [],
+      "children_ids": [],
+      "definition": "부정적인 상황에 직면했을 때 외부에서만 원인을 찾는 것이 아니라 스스로를 돌아보는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:수용성",
+      "name": "수용성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "정체성",
+        "수용성"
+      ],
+      "parent_name": "정체성",
+      "parent_id": "written:l2:정체성",
+      "children": [],
+      "children_ids": [],
+      "definition": "나와 다른 타인의 생각, 의견, 가치관을 거부감없이 잘 받아들일 수 있는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:능동성",
+      "name": "능동성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "정체성",
+        "능동성"
+      ],
+      "parent_name": "정체성",
+      "parent_id": "written:l2:정체성",
+      "children": [],
+      "children_ids": [],
+      "definition": "주도적, 접근적, 자발적인 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l2:관계성",
+      "name": "관계성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "관계성"
+      ],
+      "parent_name": "관계 예측",
+      "parent_id": "written:l1:관계 예측",
+      "children": [
+        "공감성",
+        "우호성",
+        "협력성"
+      ],
+      "children_ids": [
+        "written:l3:공감성",
+        "written:l3:우호성",
+        "written:l3:협력성"
+      ],
+      "definition": "타인에게 얼마나 관심이 있고, 이해하고, 돕고자 하는지에 대한 성향",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:공감성",
+      "name": "공감성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "관계성",
+        "공감성"
+      ],
+      "parent_name": "관계성",
+      "parent_id": "written:l2:관계성",
+      "children": [],
+      "children_ids": [],
+      "definition": "타인의 관점에서 생각하고 그 사람의 감정을 느끼고 이해하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:우호성",
+      "name": "우호성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "관계성",
+        "우호성"
+      ],
+      "parent_name": "관계성",
+      "parent_id": "written:l2:관계성",
+      "children": [],
+      "children_ids": [],
+      "definition": "타인에게 관심이 있고 타인에게 친절한 태도로 대하는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l3:협력성",
+      "name": "협력성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "관계 예측",
+        "관계성",
+        "협력성"
+      ],
+      "parent_name": "관계성",
+      "parent_id": "written:l2:관계성",
+      "children": [],
+      "children_ids": [],
+      "definition": "집단 중심적, 공동체 중심적인 사고와 남을 도와주려는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "관계 예측"
+    },
+    {
+      "id": "written:l2:객관성",
+      "name": "객관성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "객관성"
+      ],
+      "parent_name": "적응 예측",
+      "parent_id": "written:l1:적응 예측",
+      "children": [
+        "도덕성",
+        "정직성",
+        "책임성"
+      ],
+      "children_ids": [
+        "written:l3:도덕성",
+        "written:l3:정직성",
+        "written:l3:책임성"
+      ],
+      "definition": "정해진 규칙과 집단 규범을 성실히 준수하고 윤리적으로 행동하는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:도덕성",
+      "name": "도덕성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "객관성",
+        "도덕성"
+      ],
+      "parent_name": "객관성",
+      "parent_id": "written:l2:객관성",
+      "children": [],
+      "children_ids": [],
+      "definition": "법이나 규칙, 사회적으로 통용되는 도덕과 관련된 의식을 잘 갖추고 있는 능력",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:정직성",
+      "name": "정직성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "객관성",
+        "정직성"
+      ],
+      "parent_name": "객관성",
+      "parent_id": "written:l2:객관성",
+      "children": [],
+      "children_ids": [],
+      "definition": "진실되고 솔직하게 말하고 행동하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:책임성",
+      "name": "책임성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "객관성",
+        "책임성"
+      ],
+      "parent_name": "객관성",
+      "parent_id": "written:l2:객관성",
+      "children": [],
+      "children_ids": [],
+      "definition": "나에게 주어진 것을 끝까지 맡아서 해내고자 하는 태도",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l2:비활성",
+      "name": "비활성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "비활성"
+      ],
+      "parent_name": "적응 예측",
+      "parent_id": "written:l1:적응 예측",
+      "children": [
+        "우울성",
+        "부정성",
+        "태만성"
+      ],
+      "children_ids": [
+        "written:l3:우울성",
+        "written:l3:부정성",
+        "written:l3:태만성"
+      ],
+      "definition": "상황 또는 대상에 대해 정서, 인지, 행동의 활성화 수준이 낮아 정상적인 기능/조직 활동을 하기 어려운 상태",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:우울성",
+      "name": "우울성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "비활성",
+        "우울성"
+      ],
+      "parent_name": "비활성",
+      "parent_id": "written:l2:비활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "침울하고 비참한 기분으로부터 회복하기 어렵고 자기 가치에 대해 강한 열등감을 느끼는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:부정성",
+      "name": "부정성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "비활성",
+        "부정성"
+      ],
+      "parent_name": "비활성",
+      "parent_id": "written:l2:비활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "대상에 대해 회의적이고 부정적으로 인지/사고/판단하여 나와 주변 모두에게 부정적인 영향을 끼치는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:태만성",
+      "name": "태만성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "비활성",
+        "태만성"
+      ],
+      "parent_name": "비활성",
+      "parent_id": "written:l2:비활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "개인의 부주의함과 게으름 때문에 계획을 완수하는 것을 포함하여 목표를 이루기 위한 행동을 지속하기 어려운 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l2:과활성",
+      "name": "과활성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L2",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "과활성"
+      ],
+      "parent_name": "적응 예측",
+      "parent_id": "written:l1:적응 예측",
+      "children": [
+        "불안성",
+        "충동성",
+        "공격성"
+      ],
+      "children_ids": [
+        "written:l3:불안성",
+        "written:l3:충동성",
+        "written:l3:공격성"
+      ],
+      "definition": "상황 또는 대상에 대해 정서, 인지, 행동의 활성화 수준이 높아 정상적인 기능/조직 활동을 하기 어려운 상태",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:불안성",
+      "name": "불안성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "과활성",
+        "불안성"
+      ],
+      "parent_name": "과활성",
+      "parent_id": "written:l2:과활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "상황에 대해 과도하게 반응하여 비기능적인 불안, 걱정, 그리고 공포 등을 표출하는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:충동성",
+      "name": "충동성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "과활성",
+        "충동성"
+      ],
+      "parent_name": "과활성",
+      "parent_id": "written:l2:과활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "장기적 목표보다 즉각적이고 일시적인 효용을 얻기 위해 충동에 따라 행동하는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "written:l3:공격성",
+      "name": "공격성",
+      "aliases": [],
+      "instrument": "written_competency",
+      "instrument_label": "필기 역량검사",
+      "level": "L3",
+      "path": [
+        "역검 종합점수",
+        "적응 예측",
+        "과활성",
+        "공격성"
+      ],
+      "parent_name": "과활성",
+      "parent_id": "written:l2:과활성",
+      "children": [],
+      "children_ids": [],
+      "definition": "대상에 대한 분노, 화 등의 부정적 감정을 조절하지 못하고 표출하여 부정적인 영향을 끼치는 성향",
+      "definition_status": "explicit",
+      "analysis_included": true,
+      "notes": [],
+      "source_section": "적응 예측"
+    },
+    {
+      "id": "video:factor:표현능력",
+      "name": "표현능력",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "factor",
+      "path": [
+        "영상면접",
+        "표현능력"
+      ],
+      "parent_name": "영상면접",
+      "parent_id": null,
+      "children": [
+        "의사표현",
+        "감정전달"
+      ],
+      "children_ids": [
+        "video:item:의사표현",
+        "video:item:감정전달"
+      ],
+      "definition": "자신의 의사와 감정을 명확하고 생생하게 전달하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 평가요인이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:의사표현",
+      "name": "의사표현",
+      "aliases": [
+        "표현능력_의사표현"
+      ],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "표현능력",
+        "의사표현"
+      ],
+      "parent_name": "표현능력",
+      "parent_id": "video:factor:표현능력",
+      "children": [],
+      "children_ids": [],
+      "definition": "자신의 생각과 의견을 다른 사람에게 명확하게 전달하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:감정전달",
+      "name": "감정전달",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "표현능력",
+        "감정전달"
+      ],
+      "parent_name": "표현능력",
+      "parent_id": "video:factor:표현능력",
+      "children": [],
+      "children_ids": [],
+      "definition": "상황에 맞는 적절한 방법으로 자신의 감정을 전달하는 능력",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:factor:답변태도",
+      "name": "답변태도",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "factor",
+      "path": [
+        "영상면접",
+        "답변태도"
+      ],
+      "parent_name": "영상면접",
+      "parent_id": null,
+      "children": [
+        "안정감",
+        "자신감"
+      ],
+      "children_ids": [
+        "video:item:안정감",
+        "video:item:자신감"
+      ],
+      "definition": "답변에서 나타나는 정서적 안정감과 자신감",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 평가요인이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:안정감",
+      "name": "안정감",
+      "aliases": [
+        "면접태도_안정성"
+      ],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "답변태도",
+        "안정감"
+      ],
+      "parent_name": "답변태도",
+      "parent_id": "video:factor:답변태도",
+      "children": [],
+      "children_ids": [],
+      "definition": "불안하거나 초조해하지 않으며 상대방을 편안하게 하는 면접 태도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:자신감",
+      "name": "자신감",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "답변태도",
+        "자신감"
+      ],
+      "parent_name": "답변태도",
+      "parent_id": "video:factor:답변태도",
+      "children": [],
+      "children_ids": [],
+      "definition": "행동이나 말투에서 자신의 판단에 확신을 보이는 당당한 태도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:factor:대인매력",
+      "name": "대인매력",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "factor",
+      "path": [
+        "영상면접",
+        "대인매력"
+      ],
+      "parent_name": "영상면접",
+      "parent_id": null,
+      "children": [
+        "신뢰도",
+        "매력도"
+      ],
+      "children_ids": [
+        "video:item:신뢰도",
+        "video:item:매력도"
+      ],
+      "definition": "상황에 맞는 언어, 표정, 제스처로 상대에게 호감과 신뢰감을 주는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 평가요인이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:신뢰도",
+      "name": "신뢰도",
+      "aliases": [],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "대인매력",
+        "신뢰도"
+      ],
+      "parent_name": "대인매력",
+      "parent_id": "video:factor:대인매력",
+      "children": [],
+      "children_ids": [],
+      "definition": "타인에게 믿을 수 있는 사람이라는 느낌을 주는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    },
+    {
+      "id": "video:item:매력도",
+      "name": "매력도",
+      "aliases": [
+        "대인매력_매력도"
+      ],
+      "instrument": "video_interview",
+      "instrument_label": "영상면접",
+      "level": "item",
+      "path": [
+        "영상면접",
+        "대인매력",
+        "매력도"
+      ],
+      "parent_name": "대인매력",
+      "parent_id": "video:factor:대인매력",
+      "children": [],
+      "children_ids": [],
+      "definition": "언어, 표정, 제스처, 전체적인 분위기 등이 다른 사람에게 좋은 감정을 주는 정도",
+      "definition_status": "explicit",
+      "analysis_included": false,
+      "notes": [
+        "필기 역량검사와 별개의 영상면접 세부항목이다.",
+        "competency score_cols에 포함하지 않는다."
+      ],
+      "source_section": "영상 면접 역량"
+    }
+  ]
+}
