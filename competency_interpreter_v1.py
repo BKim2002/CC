@@ -6,14 +6,16 @@
 
 import os
 import re
+import sqlite3
 from difflib import SequenceMatcher
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal, NotRequired
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
 
@@ -931,10 +933,19 @@ builder.add_edge("present_candidates", END)
 builder.add_edge("handle_unknown", END)
 builder.add_edge("handle_out_of_scope", END)
 
-# InMemorySaver는 같은 Python 프로세스와 thread_id 안에서 대화를 기억한다.
-# 프로그램을 재시작한 뒤에도 기억하려면 나중에 SQLite/PostgreSQL 기반
-# 체크포인터로 교체하면 된다.
-checkpointer = InMemorySaver()
+# SQLite 체크포인터는 그래프 상태를 파일에 저장하므로 프로그램을
+# 재시작한 뒤에도 같은 thread_id의 대화를 이어갈 수 있다.
+CHECKPOINT_DB_PATH = (
+    Path(__file__).parent
+    / "data"
+    / "competency_checkpoints.sqlite"
+)
+
+checkpoint_connection = sqlite3.connect(
+    str(CHECKPOINT_DB_PATH),
+    check_same_thread=False,
+)
+checkpointer = SqliteSaver(checkpoint_connection)
 app = builder.compile(checkpointer=checkpointer)
 
 def ask_competency(
@@ -959,8 +970,11 @@ def ask_competency(
     return str(result["messages"][-1].content)
 
 if __name__ == "__main__":
-    print(
-        ask_competency(
-            "환경긍정과 과활성의 정의를 알려줘."
+    try:
+        print(
+            ask_competency(
+                "환경긍정과 과활성의 정의를 알려줘."
+            )
         )
-    )
+    finally:
+        checkpoint_connection.close()
