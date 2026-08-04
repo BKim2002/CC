@@ -7,10 +7,11 @@
 import os
 import re
 import sqlite3
+import threading
 from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, NotRequired
+from typing import Any, Literal, NotRequired
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
@@ -941,12 +942,107 @@ CHECKPOINT_DB_PATH = (
     / "competency_checkpoints.sqlite"
 )
 
-checkpoint_connection = sqlite3.connect(
-    str(CHECKPOINT_DB_PATH),
-    check_same_thread=False,
-)
-checkpointer = SqliteSaver(checkpoint_connection)
-app = builder.compile(checkpointer=checkpointer)
+_runtime_lock = threading.RLock()
+checkpoint_connection: sqlite3.Connection | None = None
+checkpointer: SqliteSaver | None = None
+app: Any | None = None
+
+
+def initialize_competency_runtime() -> None:
+    """그래프와 SQLite 체크포인터를 프로세스당 한 번 준비한다."""
+
+    global app, checkpoint_connection, checkpointer
+
+    with _runtime_lock:
+        if app is not None:
+            return
+
+        CHECKPOINT_DB_PATH.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        connection = sqlite3.connect(
+            str(CHECKPOINT_DB_PATH),
+            check_same_thread=False,
+        )
+
+        try:
+            saver = SqliteSaver(connection)
+            compiled_app = builder.compile(
+                checkpointer=saver
+            )
+        except Exception:
+            connection.close()
+            raise
+
+        checkpoint_connection = connection
+        checkpointer = saver
+        app = compiled_app
+
+
+def close_competency_runtime() -> None:
+    """웹 서버 또는 CLI 종료 시 SQLite 연결을 안전하게 닫는다."""
+
+    global app, checkpoint_connection, checkpointer
+
+    with _runtime_lock:
+        connection = checkpoint_connection
+
+        # 이후 호출에서 다시 초기화할 수 있도록 참조를 먼저 비운다.
+        app = None
+        checkpointer = None
+        checkpoint_connection = None
+
+        if connection is not None:
+            connection.close()
+
+
+def run_competency(
+    question: str,
+    thread_id: str,
+) -> dict[str, Any]:
+    """LangGraph를 실행하고 웹 API가 사용할 전체 상태를 반환한다."""
+
+    with _runtime_lock:
+        initialize_competency_runtime()
+        assert app is not None
+
+        return app.invoke(
+            {
+                "messages": [
+                    HumanMessage(content=question)
+                ]
+            },
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                }
+            },
+        )
+
+
+def get_competency_state(
+    thread_id: str,
+) -> dict[str, Any]:
+    """스레드의 최신 내부 상태를 읽되 새 메시지는 추가하지 않는다."""
+
+    with _runtime_lock:
+        initialize_competency_runtime()
+        assert app is not None
+
+        snapshot = app.get_state(
+            {
+                "configurable": {
+                    "thread_id": thread_id,
+                }
+            }
+        )
+
+        if not snapshot.values:
+            return {}
+
+        return dict(snapshot.values)
+
 
 def ask_competency(
     question: str,
@@ -954,20 +1050,13 @@ def ask_competency(
 ) -> str:
     """같은 thread_id로 호출하면 앞선 후보와 역량을 기억한다."""
 
-    result = app.invoke(
-        {
-            "messages": [
-                HumanMessage(content=question)
-            ]
-        },
-        config={
-            "configurable": {
-                "thread_id": thread_id,
-            }
-        },
+    result = run_competency(
+        question,
+        thread_id,
     )
 
     return str(result["messages"][-1].content)
+
 
 if __name__ == "__main__":
     try:
@@ -977,4 +1066,4 @@ if __name__ == "__main__":
             )
         )
     finally:
-        checkpoint_connection.close()
+        close_competency_runtime()

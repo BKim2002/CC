@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    name="description"
+    content="역량의 정의, 하위요인, 위계 구조를 안내하는 로컬 챗봇"
+  >
+  <title>역량 해석 챗봇</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/chat.js" defer></script>
+</head>
+<body>
+  <main class="app-shell" aria-labelledby="appTitle">
+    <header class="app-header">
+      <div class="brand-group">
+        <div class="brand-mark" aria-hidden="true">역</div>
+        <div>
+          <p class="eyebrow">COMPETENCY GUIDE</p>
+          <h1 id="appTitle">역량 해석 챗봇</h1>
+          <p class="app-description">
+            역량명을 입력하거나 행동의 특징을 질문하면 정의와 위계를 찾아드려요.
+          </p>
+        </div>
+      </div>
+      <button
+        class="secondary-button"
+        id="newThreadButton"
+        type="button"
+      >
+        새 대화
+      </button>
+    </header>
+
+    <section class="status-bar" aria-label="연결 상태">
+      <span class="status-dot" id="statusDot" aria-hidden="true"></span>
+      <span id="statusText">연결을 준비하고 있어요</span>
+    </section>
+
+    <div
+      class="error-banner"
+      id="errorBanner"
+      role="alert"
+      hidden
+    ></div>
+
+    <section
+      class="message-list"
+      id="messageList"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+      aria-busy="false"
+      aria-label="대화 내용"
+    ></section>
+
+    <section
+      class="candidate-panel"
+      id="candidatePanel"
+      aria-labelledby="candidateTitle"
+      hidden
+    >
+      <p id="candidateTitle">찾으시는 역량을 선택해 주세요</p>
+      <div class="candidate-list" id="candidateList"></div>
+    </section>
+
+    <form class="composer" id="chatForm">
+      <label class="sr-only" for="messageInput">역량 질문</label>
+      <textarea
+        id="messageInput"
+        name="message"
+        rows="2"
+        maxlength="2000"
+        placeholder="예: 성실성의 정의와 하위요인을 알려줘"
+        aria-describedby="inputHelp"
+        required
+      ></textarea>
+      <button class="send-button" id="sendButton" type="submit">
+        전송
+      </button>
+      <p class="input-help" id="inputHelp">
+        Enter로 전송 · Shift+Enter로 줄바꿈
+      </p>
+    </form>
+
+    <p class="privacy-note">
+      대화는 이 컴퓨터의 SQLite에 저장됩니다. 대화 ID는 인증 수단이 아닙니다.
+    </p>
+
+    <div class="sr-only" id="liveAnnouncement" aria-live="assertive"></div>
+  </main>
+</body>
+</html>
