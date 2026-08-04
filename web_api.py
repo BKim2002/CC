@@ -75,7 +75,7 @@ class ConversationResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """서버 시작과 종료에 맞춰 SQLite 연결을 관리한다."""
+    """서버 시작과 종료에 맞춰 PostgreSQL 연결을 관리한다."""
 
     initialize_competency_runtime()
 

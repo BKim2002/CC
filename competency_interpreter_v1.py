@@ -6,17 +6,17 @@
 
 import os
 import re
-import sqlite3
 import threading
+from contextlib import ExitStack
 from difflib import SequenceMatcher
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Literal, NotRequired
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
 
@@ -934,67 +934,76 @@ builder.add_edge("present_candidates", END)
 builder.add_edge("handle_unknown", END)
 builder.add_edge("handle_out_of_scope", END)
 
-# SQLite 체크포인터는 그래프 상태를 파일에 저장하므로 프로그램을
-# 재시작한 뒤에도 같은 thread_id의 대화를 이어갈 수 있다.
-CHECKPOINT_DB_PATH = (
-    Path(__file__).parent
-    / "data"
-    / "competency_checkpoints.sqlite"
-)
-
 _runtime_lock = threading.RLock()
-checkpoint_connection: sqlite3.Connection | None = None
-checkpointer: SqliteSaver | None = None
+_runtime_stack: ExitStack | None = None
+checkpointer: BaseCheckpointSaver | None = None
 app: Any | None = None
 
 
-def initialize_competency_runtime() -> None:
-    """그래프와 SQLite 체크포인터를 프로세스당 한 번 준비한다."""
+def _get_database_url() -> str:
+    """PostgreSQL 연결 문자열을 환경 변수에서 읽는다."""
 
-    global app, checkpoint_connection, checkpointer
+    database_url = os.getenv("DATABASE_URL", "").strip()
+
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL 환경 변수가 설정되지 않았습니다."
+        )
+
+    return database_url
+
+
+def _open_checkpointer(
+    runtime_stack: ExitStack,
+) -> BaseCheckpointSaver:
+    """런타임 동안 유지할 PostgreSQL 체크포인터를 연다."""
+
+    # 테이블은 배포 전에 이미 만들어 두었으므로 setup()은 호출하지 않는다.
+    return runtime_stack.enter_context(
+        PostgresSaver.from_conn_string(_get_database_url())
+    )
+
+
+def initialize_competency_runtime() -> None:
+    """그래프와 PostgreSQL 체크포인터를 프로세스당 한 번 준비한다."""
+
+    global app, _runtime_stack, checkpointer
 
     with _runtime_lock:
         if app is not None:
             return
 
-        CHECKPOINT_DB_PATH.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        connection = sqlite3.connect(
-            str(CHECKPOINT_DB_PATH),
-            check_same_thread=False,
-        )
+        runtime_stack = ExitStack()
 
         try:
-            saver = SqliteSaver(connection)
+            saver = _open_checkpointer(runtime_stack)
             compiled_app = builder.compile(
                 checkpointer=saver
             )
         except Exception:
-            connection.close()
+            runtime_stack.close()
             raise
 
-        checkpoint_connection = connection
+        _runtime_stack = runtime_stack
         checkpointer = saver
         app = compiled_app
 
 
 def close_competency_runtime() -> None:
-    """웹 서버 또는 CLI 종료 시 SQLite 연결을 안전하게 닫는다."""
+    """웹 서버 또는 CLI 종료 시 PostgreSQL 연결을 안전하게 닫는다."""
 
-    global app, checkpoint_connection, checkpointer
+    global app, _runtime_stack, checkpointer
 
     with _runtime_lock:
-        connection = checkpoint_connection
+        runtime_stack = _runtime_stack
 
         # 이후 호출에서 다시 초기화할 수 있도록 참조를 먼저 비운다.
         app = None
         checkpointer = None
-        checkpoint_connection = None
+        _runtime_stack = None
 
-        if connection is not None:
-            connection.close()
+        if runtime_stack is not None:
+            runtime_stack.close()
 
 
 def run_competency(

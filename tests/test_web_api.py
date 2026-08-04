@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import ExitStack, closing
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 import competency_interpreter_v1 as interpreter
 import web_api
@@ -18,13 +21,30 @@ def client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """OpenAI 호출과 실제 체크포인트 DB를 분리한 테스트 클라이언트."""
+    """OpenAI 호출과 실제 PostgreSQL을 분리한 테스트 클라이언트."""
 
     interpreter.close_competency_runtime()
+
+    test_database_path = tmp_path / "test_checkpoints.sqlite"
+
+    def open_test_checkpointer(
+        runtime_stack: ExitStack,
+    ) -> SqliteSaver:
+        connection = runtime_stack.enter_context(
+            closing(
+                sqlite3.connect(
+                    str(test_database_path),
+                    check_same_thread=False,
+                )
+            )
+        )
+
+        return SqliteSaver(connection)
+
     monkeypatch.setattr(
         interpreter,
-        "CHECKPOINT_DB_PATH",
-        tmp_path / "test_checkpoints.sqlite",
+        "_open_checkpointer",
+        open_test_checkpointer,
     )
     monkeypatch.setenv("OPENAI_API_KEY", "")
 
