@@ -7,3 +7,11 @@ __pycache__/
 data/competency_checkpoints.sqlite
 data/competency_checkpoints.sqlite-shm
 data/competency_checkpoints.sqlite-wal
+
+# Vercel local project metadata and pulled environment files
+.vercel
+.env*
+
+# Competency source and generated registry are stored in PostgreSQL
+competency-definitions 1.md
+data/competencies.json

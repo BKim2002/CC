@@ -3,6 +3,7 @@
 import os
 import re
 import threading
+from collections.abc import Mapping
 from contextlib import ExitStack
 from functools import lru_cache
 from typing import Any, Literal, NotRequired
@@ -15,7 +16,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
 
-from competency_registry import lookup
+from competency_registry import RegistrySnapshot, load_active_registry
 
 # 프로젝트 폴더의 .env가 있으면 OPENAI_API_KEY 등을 읽는다.
 # 이미 운영체제 환경 변수에 값이 있으면 그 값을 덮어쓰지 않는다.
@@ -72,17 +73,42 @@ class CompetencyState(MessagesState):
     last_resolved_names: NotRequired[list[str]]
 
 # ---------------------------------------------------------------------------
-# 공통 레지스트리와 정확 일치 도구
+# 런타임 레지스트리와 정확 일치 도구
 # ---------------------------------------------------------------------------
 
-# lookup에는 정식 이름뿐 아니라 구역검 별칭도 들어 있다.
-# 이 딕셔너리는 정식 역량명만 key로 사용하는 조회용 딕셔너리다.
-CANONICAL_LOOKUP = {
-    item["name"]: item
-    for item in lookup.values()
-}
+# 레지스트리는 import 시점이 아니라 런타임 초기화 시 DB에서
+# 한 번만 로드한다. 그래프의 모든 노드는 같은 불변 스냅샷을 공유한다.
+_registry_snapshot: RegistrySnapshot | None = None
 
-CANONICAL_NAMES = sorted(CANONICAL_LOOKUP)
+
+def _require_registry() -> RegistrySnapshot:
+    """초기화된 런타임 레지스트리를 반환한다."""
+
+    if _registry_snapshot is None:
+        raise RuntimeError("역량 레지스트리가 초기화되지 않았습니다.")
+
+    return _registry_snapshot
+
+
+def _mutable_json_copy(value: Any) -> Any:
+    """Copy frozen registry data into checkpoint-safe JSON containers."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _mutable_json_copy(member)
+            for key, member in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [_mutable_json_copy(member) for member in value]
+
+    return value
+
+
+def _mutable_registry_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    copied = _mutable_json_copy(item)
+    assert isinstance(copied, dict)
+    return copied
 
 DEFAULT_FIELDS: list[RequestedField] = [
     "definition",
@@ -96,6 +122,7 @@ EXACT_NAME_SEPARATOR = re.compile(r"[,，\n]+")
 def extract_exact_registered_names(query: str) -> list[str]:
     """입력 전체가 정확한 등록 이름 목록일 때만 정식 이름을 반환한다."""
 
+    registry = _require_registry()
     stripped = query.strip()
 
     if not stripped:
@@ -113,7 +140,7 @@ def extract_exact_registered_names(query: str) -> list[str]:
     seen_ids: set[str] = set()
 
     for raw_name in raw_names:
-        item = lookup.get(raw_name)
+        item = registry.lookup.get(raw_name)
 
         # 한 항목이라도 정확히 등록된 이름/별칭이 아니면 전체 문장을
         # 자연어 질의로 보고 LLM 파서에 맡긴다.
@@ -147,12 +174,16 @@ def normalize_requested_fields(
 def validate_registry_names(names: list[str]) -> list[str]:
     """LLM이 반환한 이름을 레지스트리에서 다시 검증한다."""
 
+    registry = _require_registry()
     validated: list[str] = []
     seen_ids: set[str] = set()
 
     for raw_name in names:
         name = raw_name.strip()
-        item = lookup.get(name) or CANONICAL_LOOKUP.get(name)
+        item = (
+            registry.lookup.get(name)
+            or registry.canonical_lookup.get(name)
+        )
 
         if item is None or item["id"] in seen_ids:
             continue
@@ -200,41 +231,6 @@ def _semantic_selector_for(model_name: str):
         SemanticSelection,
         method="json_schema",
     )
-
-REGISTRY_NAME_LIST = "\n".join(
-    (
-        f"- {name}"
-        + (
-            f" (등록 별칭: {', '.join(CANONICAL_LOOKUP[name].get('aliases', []))})"
-            if CANONICAL_LOOKUP[name].get("aliases")
-            else ""
-        )
-    )
-    for name in CANONICAL_NAMES
-)
-
-def build_registry_catalog() -> str:
-    """의미 검색에 필요한 레지스트리 정보를 짧은 목록으로 만든다."""
-
-    lines: list[str] = []
-
-    for name in CANONICAL_NAMES:
-        item = CANONICAL_LOOKUP[name]
-        definition = (
-            item.get("definition")
-            or "독립적인 정의가 제공되어 있지 않음"
-        )
-        path = " > ".join(item.get("path", [])) or "위계 정보 없음"
-
-        lines.append(
-            f"- 이름: {name}\n"
-            f"  정의: {definition}\n"
-            f"  위계: {path}"
-        )
-
-    return "\n".join(lines)
-
-REGISTRY_CATALOG = build_registry_catalog()
 
 # ---------------------------------------------------------------------------
 # LangGraph 노드
@@ -291,6 +287,7 @@ def route_after_interpret(
 def llm_interpret_query(state: CompetencyState) -> dict:
     """구조화 출력으로 질문의 종류와 요청 필드를 분류한다."""
 
+    registry = _require_registry()
     query = state.get("raw_query", "")
     previous_candidates = validate_registry_names(
         list(state.get("candidate_names", []))
@@ -329,7 +326,7 @@ def llm_interpret_query(state: CompetencyState) -> dict:
 - 이전 요청 필드: {previous_fields or '없음'}
 
 허용된 정식 역량명과 등록 별칭:
-{REGISTRY_NAME_LIST}
+{registry.name_catalog}
 """.strip()
 
     parsed = _query_parser_for(
@@ -397,6 +394,7 @@ def route_after_llm(state: CompetencyState) -> LlmRoute:
 def find_semantic_candidates(state: CompetencyState) -> dict:
     """정의와 위계를 비교해 의미상 가까운 후보를 고른다."""
 
+    registry = _require_registry()
     semantic_query = (
         state.get("semantic_query")
         or state.get("raw_query", "")
@@ -409,7 +407,7 @@ def find_semantic_candidates(state: CompetencyState) -> dict:
 반드시 목록에 있는 이름만 반환하고 정의를 새로 만들지 마세요.
 
 역량 레지스트리:
-{REGISTRY_CATALOG}
+{registry.semantic_catalog}
 """.strip()
 
     selection = _semantic_selector_for(
@@ -444,16 +442,19 @@ def route_after_candidates(
 def find_competencies(state: CompetencyState) -> dict:
     """확정된 정식 역량명으로 레지스트리를 조회한다."""
 
+    registry = _require_registry()
     matched_items: list[dict] = []
     seen_ids: set[str] = set()
 
     for name in state.get("resolved_names", []):
-        item = CANONICAL_LOOKUP.get(name)
+        item = registry.canonical_lookup.get(name)
 
         if item is None or item["id"] in seen_ids:
             continue
 
-        matched_items.append(item)
+        # RegistrySnapshot은 프로세스 전체가 공유하는 불변 데이터다.
+        # 체크포인트 상태에는 JSON 직렬화 가능한 독립 복사본만 저장한다.
+        matched_items.append(_mutable_registry_item(item))
         seen_ids.add(item["id"])
 
     return {
@@ -468,6 +469,7 @@ def find_competencies(state: CompetencyState) -> dict:
 def produce_answer(state: CompetencyState) -> dict:
     """확정된 레지스트리 항목에서 사용자가 요청한 정보만 답한다."""
 
+    _require_registry()
     requested_fields = set(
         state.get("requested_fields", DEFAULT_FIELDS)
     )
@@ -524,6 +526,7 @@ def produce_answer(state: CompetencyState) -> dict:
 def present_candidates(state: CompetencyState) -> dict:
     """오타 또는 의미 검색 후보를 보여주고 다음 턴의 확인을 기다린다."""
 
+    registry = _require_registry()
     lines = [
         "입력한 표현과 관련된 역량 후보를 찾았습니다."
     ]
@@ -532,7 +535,7 @@ def present_candidates(state: CompetencyState) -> dict:
         state.get("candidate_names", []),
         start=1,
     ):
-        item = CANONICAL_LOOKUP[name]
+        item = registry.canonical_lookup[name]
         definition = (
             item.get("definition")
             or "독립적인 정의가 제공되어 있지 않음"
@@ -632,32 +635,42 @@ def _get_database_url() -> str:
 
 def _open_checkpointer(
     runtime_stack: ExitStack,
+    database_url: str,
 ) -> BaseCheckpointSaver:
     """런타임 동안 유지할 PostgreSQL 체크포인터를 연다."""
 
     # 테이블은 setup_checkpoint_database.py로 미리 준비한다.
     return runtime_stack.enter_context(
-        PostgresSaver.from_conn_string(_get_database_url())
+        PostgresSaver.from_conn_string(database_url)
     )
 
 
 def initialize_competency_runtime() -> None:
     """그래프와 PostgreSQL 체크포인터를 프로세스당 한 번 준비한다."""
 
-    global app, _runtime_stack
+    global app, _registry_snapshot, _runtime_stack
 
     with _runtime_lock:
         if app is not None:
             return
 
+        # app이 없는 상태에서 새 초기화를 시작할 때는 예전
+        # 실패에서 남은 스냅샷을 절대 재사용하지 않는다.
+        _registry_snapshot = None
+        database_url = _get_database_url()
         runtime_stack = ExitStack()
 
         try:
-            saver = _open_checkpointer(runtime_stack)
+            registry_snapshot = load_active_registry(database_url)
+            _registry_snapshot = registry_snapshot
+            saver = _open_checkpointer(runtime_stack, database_url)
             compiled_app = builder.compile(
                 checkpointer=saver
             )
         except Exception:
+            app = None
+            _runtime_stack = None
+            _registry_snapshot = None
             runtime_stack.close()
             raise
 
@@ -668,13 +681,14 @@ def initialize_competency_runtime() -> None:
 def close_competency_runtime() -> None:
     """웹 서버 또는 CLI 종료 시 PostgreSQL 연결을 안전하게 닫는다."""
 
-    global app, _runtime_stack
+    global app, _registry_snapshot, _runtime_stack
 
     with _runtime_lock:
         runtime_stack = _runtime_stack
 
         # 이후 호출에서 다시 초기화할 수 있도록 참조를 먼저 비운다.
         app = None
+        _registry_snapshot = None
         _runtime_stack = None
 
         if runtime_stack is not None:

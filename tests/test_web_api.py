@@ -13,6 +13,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import competency_interpreter as interpreter
 import web_api
+from competency_registry import RegistrySnapshot
 from web_api import app
 
 
@@ -78,6 +79,51 @@ class SemanticSelectorStub:
         )
 
 
+def make_synthetic_registry() -> RegistrySnapshot:
+    """운영 레지스트리와 분리된 웹 API 테스트 스냅샷이다."""
+
+    items = [
+        {
+            "id": "conscientiousness",
+            "name": "성실성",
+            "aliases": [],
+            "definition": "맡은 일을 꼼꼼하고 성실하게 수행하는 특성",
+            "definition_status": "provided",
+            "children": ["점검행동", "조절행동", "유지행동"],
+            "path": ["성실성"],
+        },
+        {
+            "id": "empathy",
+            "name": "공감성",
+            "aliases": [],
+            "definition": "타인의 감정과 입장을 이해하는 특성",
+            "definition_status": "provided",
+            "children": [],
+            "path": ["공감성"],
+        },
+    ]
+    canonical_lookup = {item["name"]: item for item in items}
+    canonical_names = tuple(sorted(canonical_lookup))
+    name_catalog = "\n".join(f"- {name}" for name in canonical_names)
+    semantic_catalog = "\n".join(
+        f"- 이름: {name}\n  정의: {canonical_lookup[name]['definition']}"
+        for name in canonical_names
+    )
+
+    return RegistrySnapshot(
+        version_id=1,
+        source_filename="synthetic.md",
+        source_sha256="b" * 64,
+        schema_version="1.0",
+        document={"schema_version": "1.0", "items": items},
+        lookup=dict(canonical_lookup),
+        canonical_lookup=canonical_lookup,
+        canonical_names=canonical_names,
+        name_catalog=name_catalog,
+        semantic_catalog=semantic_catalog,
+    )
+
+
 @pytest.fixture()
 def client(
     tmp_path: Path,
@@ -88,9 +134,11 @@ def client(
     interpreter.close_competency_runtime()
 
     test_database_path = tmp_path / "test_checkpoints.sqlite"
+    registry_snapshot = make_synthetic_registry()
 
     def open_test_checkpointer(
         runtime_stack: ExitStack,
+        _: str,
     ) -> SqliteSaver:
         connection = runtime_stack.enter_context(
             closing(
@@ -110,6 +158,11 @@ def client(
     )
     monkeypatch.setattr(
         interpreter,
+        "load_active_registry",
+        lambda _: registry_snapshot,
+    )
+    monkeypatch.setattr(
+        interpreter,
         "_query_parser_for",
         lambda _: QueryParserStub(),
     )
@@ -119,6 +172,7 @@ def client(
         lambda _: SemanticSelectorStub(),
     )
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
 
     with TestClient(app) as test_client:
         yield test_client

@@ -4,14 +4,10 @@ import argparse
 import hashlib
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = PROJECT_ROOT / "competency-definitions 1.md"
-DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "competencies.json"
 
 WRITTEN_INSTRUMENT = "written_competency"
 VIDEO_INSTRUMENT = "video_interview"
@@ -550,6 +546,21 @@ def validate_items(items: list[dict[str, Any]]) -> dict[str, int]:
     if len(ids) != len(set(ids)):
         errors.append("중복된 항목 ID가 있습니다.")
 
+    # 런타임 lookup은 검사 종류와 무관하게 하나의 이름 공간을 사용한다.
+    # 업로드 전에 같은 규칙으로 검증해, 저장에는 성공했지만 다음 startup에서
+    # 거부되는 레지스트리를 만들지 않는다.
+    lookup_owners: dict[str, str] = {}
+    for item in items:
+        name = item["name"]
+        previous_owner = lookup_owners.get(name)
+        if previous_owner is not None:
+            errors.append(
+                f"중복된 정식 명칭이 있습니다: {name} "
+                f"({previous_owner}, {item['id']})"
+            )
+        else:
+            lookup_owners[name] = item["id"]
+
     for item in items:
         if not item["path"] or item["path"][-1] != item["name"]:
             errors.append(f"{item['name']}: path의 마지막 값이 정식 명칭과 다릅니다.")
@@ -625,19 +636,16 @@ def validate_items(items: list[dict[str, Any]]) -> dict[str, int]:
                 f"{len(item['children'])}개입니다."
             )
 
-    alias_targets: dict[tuple[str, str], set[str]] = defaultdict(set)
     for item in items:
         for alias in item["aliases"]:
-            if alias == item["name"]:
-                errors.append(f"{item['name']}: 정식 명칭과 동일한 별칭이 있습니다.")
-            alias_targets[(item["instrument"], alias)].add(item["name"])
-
-    for (instrument, alias), targets in alias_targets.items():
-        if len(targets) > 1:
-            errors.append(
-                f"{instrument}의 별칭 '{alias}'가 여러 항목을 가리킵니다: "
-                f"{sorted(targets)}"
-            )
+            previous_owner = lookup_owners.get(alias)
+            if previous_owner is not None:
+                errors.append(
+                    f"조회 이름 '{alias}'가 정식 명칭 또는 다른 별칭과 "
+                    f"충돌합니다: {previous_owner}, {item['id']}"
+                )
+            else:
+                lookup_owners[alias] = item["id"]
 
     if errors:
         formatted = "\n".join(f"- {error}" for error in errors)
@@ -674,59 +682,64 @@ def build_registry(source_path: Path) -> dict[str, Any]:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="역량 정의 Markdown을 검증된 JSON 레지스트리로 변환합니다."
     )
     parser.add_argument(
         "--source",
         type=Path,
-        default=DEFAULT_SOURCE,
-        help=f"원본 Markdown 경로 (기본값: {DEFAULT_SOURCE})",
+        required=True,
+        help="원본 Markdown 경로",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"출력 JSON 경로 (기본값: {DEFAULT_OUTPUT})",
+        help="생성한 JSON을 저장할 선택적 경로",
     )
     parser.add_argument(
         "--check",
-        action="store_true",
-        help="기존 JSON이 현재 Markdown 변환 결과와 정확히 일치하는지만 검사합니다.",
+        type=Path,
+        metavar="JSON_PATH",
+        help="현재 변환 결과와 비교할 기존 JSON 경로",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     source_path = args.source.resolve()
-    output_path = args.output.resolve()
 
     if not source_path.is_file():
         raise RegistryError(f"원본 Markdown 파일이 없습니다: {source_path}")
+    if args.output is not None and args.check is not None:
+        raise RegistryError("--output과 --check는 동시에 사용할 수 없습니다.")
 
     registry = build_registry(source_path)
 
-    if args.check:
-        if not output_path.is_file():
-            raise RegistryError(f"검수할 JSON 파일이 없습니다: {output_path}")
-        existing = json.loads(output_path.read_text(encoding="utf-8"))
+    if args.check is not None:
+        check_path = args.check.resolve()
+        if not check_path.is_file():
+            raise RegistryError(f"검수할 JSON 파일이 없습니다: {check_path}")
+        existing = json.loads(check_path.read_text(encoding="utf-8"))
         if existing != registry:
             raise RegistryError(
                 "기존 JSON이 현재 Markdown에서 생성되는 결과와 일치하지 않습니다."
             )
-        action = "검수 완료"
-    else:
+        action = f"검수 완료: {check_path}"
+    elif args.output is not None:
+        output_path = args.output.resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        action = "변환 완료"
+        action = f"변환 완료: {output_path}"
+    else:
+        action = "검증 완료"
 
     counts = registry["validation"]["counts"]
-    print(f"{action}: {output_path}")
+    print(action)
     print(f"원본 SHA-256: {registry['source']['sha256']}")
     print(
         "항목 수: "
