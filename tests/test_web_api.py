@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-import competency_interpreter_v1 as interpreter
+import competency_interpreter as interpreter
 import web_api
 from web_api import app
 
@@ -104,40 +104,33 @@ def test_new_thread_has_empty_history(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    ("payload", "path"),
+    "payload",
     [
-        (
-            {
-                "message": "   ",
-                "thread_id": "00000000-0000-4000-8000-000000000000",
-            },
-            "/api/chat",
-        ),
-        (
-            {
-                "message": "가" * 2001,
-                "thread_id": "00000000-0000-4000-8000-000000000000",
-            },
-            "/api/chat",
-        ),
-        (
-            {
-                "message": "성실성을 알려줘.",
-                "thread_id": "00000000-0000-4000-8000-000000000000",
-                "unexpected": True,
-            },
-            "/api/chat",
-        ),
+        {
+            "message": "   ",
+            "thread_id": "00000000-0000-4000-8000-000000000000",
+        },
+        {
+            "message": "가" * 2001,
+            "thread_id": "00000000-0000-4000-8000-000000000000",
+        },
+        {
+            "message": "성실성을 알려줘.",
+            "thread_id": "00000000-0000-4000-8000-000000000000",
+            "unexpected": True,
+        },
     ],
 )
 def test_chat_input_validation(
     client: TestClient,
     payload: dict,
-    path: str,
 ) -> None:
-    response = client.post(path, json=payload)
+    response = client.post("/api/chat", json=payload)
 
     assert response.status_code == 422
+
+    if payload["message"].isspace():
+        assert "질문을 입력해 주세요." in response.text
 
 
 def test_invalid_thread_id_is_rejected(client: TestClient) -> None:
@@ -335,7 +328,8 @@ def test_public_assets_do_not_contain_server_secrets(
 
     forbidden_values = (
         "OPENAI_API_KEY",
-        "competency_checkpoints.sqlite",
+        "DATABASE_URL",
+        "postgresql://",
         "C:\\Users\\ksy0823",
     )
 
@@ -353,7 +347,7 @@ def test_internal_error_response_does_not_leak_details(
 
     def raise_internal_error(_: str, __: str) -> dict:
         raise RuntimeError(
-            "Traceback: C:\\secret\\competency_checkpoints.sqlite"
+            "Traceback: postgresql://admin:password@secret-host/database"
         )
 
     monkeypatch.setattr(web_api, "run_competency", raise_internal_error)
@@ -374,4 +368,5 @@ def test_internal_error_response_does_not_leak_details(
         )
     }
     assert "Traceback" not in response.text
-    assert "competency_checkpoints.sqlite" not in response.text
+    assert "password" not in response.text
+    assert "secret-host" not in response.text

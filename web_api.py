@@ -1,4 +1,4 @@
-"""역량 해석 LangGraph를 브라우저에 연결하는 로컬 FastAPI 서버."""
+"""역량 해석 LangGraph를 브라우저에 연결하는 FastAPI 서버."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from competency_interpreter_v1 import (
+from competency_interpreter import (
     close_competency_runtime,
     get_competency_state,
     initialize_competency_runtime,
@@ -38,7 +38,6 @@ class ChatRequest(BaseModel):
     )
 
     message: str = Field(
-        min_length=1,
         max_length=MAX_MESSAGE_LENGTH,
     )
     thread_id: UUID
@@ -46,10 +45,10 @@ class ChatRequest(BaseModel):
     @field_validator("message")
     @classmethod
     def reject_blank_message(cls, value: str) -> str:
-        if not value.strip():
+        if not value:
             raise ValueError("질문을 입력해 주세요.")
 
-        return value.strip()
+        return value
 
 
 class ChatResponse(BaseModel):
