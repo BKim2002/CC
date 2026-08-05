@@ -1,15 +1,18 @@
 # 역량 해석 웹 챗봇 실행 안내
 
-이 프로젝트는 기존 LangGraph 역량 해석기를 FastAPI와 HTML·CSS·JavaScript 기반의 로컬 웹 채팅 화면에 연결한다.
+이 프로젝트는 LangGraph 역량 해석기를 FastAPI와 HTML·CSS·JavaScript 기반의 웹 채팅 화면에 연결한다. 로컬 Uvicorn 실행과 Vercel 배포 진입점을 모두 제공한다.
 
 ## 구성
 
+- `app.py`: Vercel이 자동 탐지하는 FastAPI 진입점
 - `web_api.py`: FastAPI 서버, 요청 검증, 정적 파일 제공, LangGraph 연결
 - `static/index.html`: 채팅 화면 구조
 - `static/style.css`: 반응형 채팅 UI
 - `static/chat.js`: 대화 생성·전송·복원과 후보 버튼 처리
-- `competency_interpreter_v1.py`: 역량 해석 그래프와 PostgreSQL 체크포인터
-- `tests/test_web_api.py`: API, 상태 격리, 복원 테스트
+- `competency_interpreter.py`: 역량 해석 그래프와 PostgreSQL 체크포인터
+- `scripts/setup_checkpoint_database.py`: 최초 PostgreSQL 테이블 준비
+- `tests/`: 핵심 해석 로직, API·상태 격리·복원, DB 준비 테스트
+- `requirements.txt` / `requirements-dev.txt`: 운영 / 테스트 의존성
 
 ## 처음 한 번 설치
 
@@ -21,10 +24,10 @@ cd C:\Users\ksy0823\.vscode\LangGraph
 python -m pip install -r requirements.txt
 ```
 
-테스트까지 실행하려면 테스트 전용 패키지도 설치한다.
+테스트까지 실행하려면 테스트 의존성을 함께 설치한다.
 
 ```powershell
-python -m pip install pytest httpx langgraph-checkpoint-sqlite
+python -m pip install -r requirements-dev.txt
 ```
 
 자연어 의미 검색에 OpenAI를 사용하려면 프로젝트의 `.env`에 서버용 키를 설정한다. 키를 HTML이나 JavaScript에 넣지 않는다.
@@ -36,6 +39,16 @@ DATABASE_URL=postgresql://사용자명:비밀번호@호스트:5432/데이터베�
 ```
 
 정확한 역량명·별칭 검색과 오타 후보 검색은 OpenAI 키 없이도 작동한다.
+
+## PostgreSQL 최초 준비
+
+새 데이터베이스를 처음 사용할 때 LangGraph 체크포인트 테이블을 한 번 만든다. 기존 테이블이 있는 데이터베이스에서 다시 실행해도 필요한 마이그레이션만 확인한다.
+
+```powershell
+python .\scripts\setup_checkpoint_database.py
+```
+
+서버 시작 코드는 매번 테이블을 만들지 않는다. 따라서 새 `DATABASE_URL`로 바꾼 뒤에는 위 명령을 먼저 실행해야 한다.
 
 ## 개발 서버 실행
 
@@ -63,6 +76,12 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 
 대화 상태는 PostgreSQL 체크포인터에 저장된다. 현재 같은 프로세스 안의 동시 실행만 락으로 보호하므로 로컬에서는 `--workers 1`로 실행한다. 여러 프로세스나 서버 인스턴스로 확장할 때는 같은 `thread_id`에 대한 동시 요청 제어와 사용자 인증을 추가로 설계해야 한다.
 
+## Vercel 배포
+
+Vercel은 루트의 `app.py`를 FastAPI 진입점으로 사용하고, `.python-version`과 `requirements.txt`로 런타임을 준비한다. 배포 전 Vercel 환경 변수에 `DATABASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`을 설정한다.
+
+현재 애플리케이션에는 로그인과 요청 횟수 제한이 없다. Vercel Deployment Protection 같은 접근 보호를 켜거나 애플리케이션 인증과 요청 제한을 구현하기 전에는 공개 URL로 운영하지 않는다. 여러 인스턴스에서 같은 `thread_id`를 동시에 처리하는 사용 방식도 지원하지 않는다.
+
 ## 테스트
 
 테스트는 운영 PostgreSQL 대신 임시 SQLite 테스트 더블을 사용하며 OpenAI API 호출을 비활성화한다.
@@ -82,6 +101,8 @@ python -m pytest -q
 - 오타 후보 저장과 후보 선택
 - 런타임 재초기화 후 대화 복원
 - 기존 `ask_competency()` 호출 방식 호환성
+- 겹치는 역량명에서 가장 긴 정확한 이름 선택
+- PostgreSQL 테이블 준비 스크립트의 환경 변수 검증
 - 공개 정적 파일의 비밀정보 비노출
 - 내부 오류 응답의 경로·예외 정보 비노출
 
@@ -91,7 +112,7 @@ python -m pytest -q
 - 실제 대화 상태는 `DATABASE_URL`이 가리키는 PostgreSQL 데이터베이스에 저장된다.
 - 새 대화 버튼은 새 UUID를 만들며 기존 PostgreSQL 기록을 삭제하지 않는다.
 - `thread_id`는 대화를 구분하는 값일 뿐 인증 수단이 아니다.
-- 로그인 기능이 없으므로 인터넷에 공개하지 않고 로컬·소규모 용도로만 사용한다.
+- 로그인과 요청 제한이 없는 상태로 인터넷에 공개하지 않는다.
 - PostgreSQL에는 사용자의 질문과 챗봇 답변이 저장된다.
 - 같은 대화를 여러 탭에서 동시에 호출하는 동작은 이번 버전의 지원 범위가 아니다.
 - 브라우저에는 API 키, DB 경로, 시스템 프롬프트, 전체 LangGraph 내부 상태를 전달하지 않는다.

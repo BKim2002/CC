@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 .env
 
-# LangGraph checkpoint database
+# Legacy/local SQLite checkpoint artifacts (production uses PostgreSQL)
 data/competency_checkpoints.sqlite
 data/competency_checkpoints.sqlite-shm
 data/competency_checkpoints.sqlite-wal

@@ -302,13 +302,18 @@ async function sendQuestion(rawQuestion) {
   }
 
   clearError();
-  appendMessage("user", question);
-  renderCandidates([]);
-  elements.messageInput.value = "";
   setLoading(true);
-  appendLoadingMessage();
 
   try {
+    if (!isUuid(threadId)) {
+      await ensureThread();
+    }
+
+    appendMessage("user", question);
+    renderCandidates([]);
+    elements.messageInput.value = "";
+    appendLoadingMessage();
+
     const data = await requestJson("/api/chat", {
       method: "POST",
       headers: {
@@ -326,6 +331,15 @@ async function sendQuestion(rawQuestion) {
     elements.liveAnnouncement.textContent = "새 답변이 도착했습니다.";
   } catch (error) {
     removeLoadingMessage();
+
+    if (isUuid(threadId)) {
+      try {
+        await restoreConversation();
+      } catch {
+        // 서버 상태도 읽지 못하면 현재 화면을 유지하고 원래 오류를 알린다.
+      }
+    }
+
     showError(error.message || "알 수 없는 오류가 발생했습니다.");
   } finally {
     setLoading(false);

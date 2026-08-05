@@ -1,8 +1,4 @@
-# competency_interpreter.py에 자연어 입력 처리 기능을 단계적으로 추가
-# 체크포인트 A: 규칙 기반 이름/의도 추출과 오타 후보 제시
-# 체크포인트 B: OpenAI 구조화 출력을 이용한 자연어 질의 분류
-# 체크포인트 C: 정의와 위계 정보를 이용한 의미 기반 후보 검색
-# 체크포인트 D: LangGraph 체크포인터를 이용한 후속 질문 처리
+"""등록된 역량을 자연어로 조회하고 대화 맥락을 유지하는 LangGraph."""
 
 import os
 import re
@@ -32,14 +28,6 @@ RequestedField = Literal[
     "path",
 ]
 
-Intent = Literal[
-    "definition",
-    "children",
-    "hierarchy",
-    "full_info",
-    "mixed",
-]
-
 QueryType = Literal[
     "named_lookup",
     "semantic_search",
@@ -55,7 +43,7 @@ LlmRoute = Literal[
 ]
 
 class ParsedNaturalLanguageQuery(BaseModel):
-    """체크포인트 B에서 LLM이 반드시 맞춰 반환할 출력 형식."""
+    """질의 분류 LLM이 반환할 구조화 형식."""
 
     query_type: QueryType
     competency_names: list[str] = Field(default_factory=list)
@@ -63,7 +51,7 @@ class ParsedNaturalLanguageQuery(BaseModel):
     semantic_query: str | None = None
 
 class SemanticSelection(BaseModel):
-    """체크포인트 C에서 LLM이 반드시 맞춰 반환할 출력 형식."""
+    """의미 검색 LLM이 반환할 구조화 형식."""
 
     candidate_names: list[str] = Field(
         default_factory=list,
@@ -74,20 +62,18 @@ class CompetencyState(MessagesState):
     """그래프의 모든 노드가 공유하는 상태."""
 
     raw_query: NotRequired[str]
-    intent: NotRequired[Intent]
     requested_fields: NotRequired[list[RequestedField]]
     resolved_names: NotRequired[list[str]]
     matched_items: NotRequired[list[dict]]
     candidate_names: NotRequired[list[str]]
-    unknown_query: NotRequired[str]
     semantic_query: NotRequired[str]
     llm_route: NotRequired[LlmRoute]
 
-    # 체크포인트 D에서 이전 턴의 대상을 기억하는 값이다.
+    # 이전 턴에서 확정된 대상을 후속 질문에 사용한다.
     last_resolved_names: NotRequired[list[str]]
 
 # ---------------------------------------------------------------------------
-# 공통 레지스트리와 규칙 기반 도구: 체크포인트 A
+# 공통 레지스트리와 규칙 기반 도구
 # ---------------------------------------------------------------------------
 
 def normalize_text(text: str) -> str:
@@ -204,26 +190,53 @@ def extract_registered_names(query: str) -> list[str]:
     hits: list[tuple[int, int, dict]] = []
 
     for normalized_name, item in SEARCH_ENTRIES:
-        position = normalized_query.find(normalized_name)
+        search_start = 0
 
-        if position >= 0:
-            hits.append((position, -len(normalized_name), item))
+        while True:
+            position = normalized_query.find(
+                normalized_name,
+                search_start,
+            )
 
-    # 사용자가 문장에서 언급한 순서를 유지한다.
-    # 같은 위치에서는 더 긴 이름을 먼저 둔다.
-    hits.sort(key=lambda hit: (hit[0], hit[1]))
+            if position < 0:
+                break
 
-    names: list[str] = []
+            hits.append(
+                (
+                    position,
+                    position + len(normalized_name),
+                    item,
+                )
+            )
+            search_start = position + 1
+
+    # "수인지력" 안의 "인지력"처럼 겹치는 이름은 긴 항목만 남긴다.
+    hits.sort(
+        key=lambda hit: (
+            -(hit[1] - hit[0]),
+            hit[0],
+        )
+    )
+
+    selected: list[tuple[int, int, dict]] = []
     seen_ids: set[str] = set()
 
-    for _, _, item in hits:
-        if item["id"] in seen_ids:
+    for start, end, item in hits:
+        overlaps = any(
+            start < selected_end and selected_start < end
+            for selected_start, selected_end, _ in selected
+        )
+
+        if item["id"] in seen_ids or overlaps:
             continue
 
-        names.append(item["name"])
+        selected.append((start, end, item))
         seen_ids.add(item["id"])
 
-    return names
+    # 최종 답변은 사용자가 문장에서 언급한 순서를 유지한다.
+    selected.sort(key=lambda hit: hit[0])
+
+    return [item["name"] for _, _, item in selected]
 
 def normalize_requested_fields(
     fields: list[str],
@@ -241,25 +254,6 @@ def normalize_requested_fields(
 
     return normalized
 
-def intent_from_fields(
-    requested_fields: list[RequestedField],
-) -> Intent:
-    """요청 필드 목록을 기존 intent 값으로 변환한다."""
-
-    if not requested_fields or requested_fields == DEFAULT_FIELDS:
-        return "full_info"
-
-    if len(requested_fields) > 1:
-        return "mixed"
-
-    intent_by_field: dict[RequestedField, Intent] = {
-        "definition": "definition",
-        "children": "children",
-        "path": "hierarchy",
-    }
-
-    return intent_by_field[requested_fields[0]]
-
 def has_explicit_field_request(query: str) -> bool:
     """사용자가 이번 문장에서 정보 종류를 직접 말했는지 확인한다."""
 
@@ -269,9 +263,7 @@ def has_explicit_field_request(query: str) -> bool:
         for keyword in keywords
     )
 
-def detect_intent(
-    query: str,
-) -> tuple[Intent, list[RequestedField]]:
+def detect_requested_fields(query: str) -> list[RequestedField]:
     """질문에서 사용자가 원하는 정보의 종류를 판별한다."""
 
     requested_fields: list[RequestedField] = []
@@ -280,11 +272,11 @@ def detect_intent(
         if any(keyword in query for keyword in keywords):
             requested_fields.append(field)
 
-    # 정보 종류가 명시되지 않으면 기존 스크립트처럼 전체 정보를 출력한다.
+    # 정보 종류가 명시되지 않으면 전체 정보를 출력한다.
     if not requested_fields:
         requested_fields = DEFAULT_FIELDS.copy()
 
-    return intent_from_fields(requested_fields), requested_fields
+    return requested_fields
 
 def extract_candidate_tokens(query: str) -> list[str]:
     """오타 후보 검색에 사용할 핵심 단어를 질문에서 추출한다."""
@@ -361,7 +353,7 @@ def validate_registry_names(names: list[str]) -> list[str]:
     return validated
 
 # ---------------------------------------------------------------------------
-# 대화 맥락 해석: 체크포인트 D
+# 대화 맥락 해석
 # ---------------------------------------------------------------------------
 
 def ordinal_index(query: str) -> int | None:
@@ -420,7 +412,7 @@ def resolve_follow_up(
     return []
 
 # ---------------------------------------------------------------------------
-# OpenAI 구조화 출력 준비: 체크포인트 B와 C
+# OpenAI 구조화 출력 준비
 # ---------------------------------------------------------------------------
 
 def openai_is_configured() -> bool:
@@ -431,7 +423,7 @@ def openai_is_configured() -> bool:
 def selected_model_name() -> str:
     """환경 변수로 모델을 바꿀 수 있게 하되 기본값을 제공한다."""
 
-    return os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+    return os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.4-mini"
 
 @lru_cache(maxsize=4)
 def _query_parser_for(model_name: str):
@@ -496,7 +488,7 @@ REGISTRY_CATALOG = build_registry_catalog()
 # ---------------------------------------------------------------------------
 
 def interpret_query(state: CompetencyState) -> dict:
-    """노드 1: 현재 질문을 규칙으로 먼저 해석하고 후속 질문을 복원한다."""
+    """현재 질문을 규칙으로 먼저 해석하고 후속 질문을 복원한다."""
 
     query = str(state["messages"][-1].content).strip()
 
@@ -504,7 +496,7 @@ def interpret_query(state: CompetencyState) -> dict:
     previous_candidates = list(state.get("candidate_names", []))
     previous_names = list(state.get("last_resolved_names", []))
 
-    intent, requested_fields = detect_intent(query)
+    requested_fields = detect_requested_fields(query)
     explicit_fields = has_explicit_field_request(query)
     resolved_names = extract_registered_names(query)
     continued_from_previous = False
@@ -534,16 +526,12 @@ def interpret_query(state: CompetencyState) -> dict:
         if not requested_fields:
             requested_fields = DEFAULT_FIELDS.copy()
 
-        intent = intent_from_fields(requested_fields)
-
     return {
         "raw_query": query,
-        "intent": intent,
         "requested_fields": requested_fields,
         "resolved_names": resolved_names,
         "matched_items": [],
         "candidate_names": [],
-        "unknown_query": "" if resolved_names else query,
         "semantic_query": "",
     }
 
@@ -565,7 +553,7 @@ def route_after_interpret(
     return "suggest_candidates"
 
 def llm_interpret_query(state: CompetencyState) -> dict:
-    """노드 2B: 구조화 출력으로 질문의 종류와 요청 필드를 분류한다."""
+    """구조화 출력으로 질문의 종류와 요청 필드를 분류한다."""
 
     query = state.get("raw_query", "")
 
@@ -627,7 +615,6 @@ def llm_interpret_query(state: CompetencyState) -> dict:
             return {
                 "resolved_names": names,
                 "requested_fields": parsed_fields,
-                "intent": intent_from_fields(parsed_fields),
                 "llm_route": "find_competencies",
             }
 
@@ -639,7 +626,7 @@ def llm_interpret_query(state: CompetencyState) -> dict:
                 "requested_fields": parsed_fields,
                 "llm_route": "present_candidates",
             }
-        
+
         semantic_query = (
             parsed.semantic_query
             or query
@@ -662,7 +649,7 @@ def llm_interpret_query(state: CompetencyState) -> dict:
             "requested_fields": parsed_fields,
             "llm_route": "find_semantic_candidates",
         }
-    
+
     # LLM이 범위 밖으로 분류했더라도 뚜렷한 오타 후보는 먼저 살린다.
     candidates = suggest_names(query)
 
@@ -683,7 +670,7 @@ def route_after_llm(state: CompetencyState) -> LlmRoute:
     return state.get("llm_route", "handle_unknown")
 
 def find_semantic_candidates(state: CompetencyState) -> dict:
-    """노드 2C: 정의와 위계를 비교해 의미상 가까운 후보를 고른다."""
+    """정의와 위계를 비교해 의미상 가까운 후보를 고른다."""
 
     semantic_query = (
         state.get("semantic_query")
@@ -721,13 +708,13 @@ def find_semantic_candidates(state: CompetencyState) -> dict:
         "candidate_names": candidates,
     }
 
-def route_after_semantic_search(
+def route_after_candidates(
     state: CompetencyState,
 ) -> Literal[
     "present_candidates",
     "handle_unknown",
 ]:
-    """의미 검색 결과가 있으면 확인을 받고, 없으면 재질문을 요청한다."""
+    """후보가 있으면 확인을 받고, 없으면 재질문을 요청한다."""
 
     if state.get("candidate_names"):
         return "present_candidates"
@@ -735,7 +722,7 @@ def route_after_semantic_search(
     return "handle_unknown"
 
 def find_competencies(state: CompetencyState) -> dict:
-    """노드 2A: 확정된 정식 역량명으로 레지스트리를 조회한다."""
+    """확정된 정식 역량명으로 레지스트리를 조회한다."""
 
     matched_items: list[dict] = []
     seen_ids: set[str] = set()
@@ -768,19 +755,6 @@ def suggest_candidates(state: CompetencyState) -> dict:
     return {
         "candidate_names": candidate_names,
     }
-
-def route_after_suggestions(
-    state: CompetencyState,
-) -> Literal[
-    "present_candidates",
-    "handle_unknown",
-]:
-    """유사 후보가 존재하는지에 따라 다음 노드를 결정한다."""
-
-    if state.get("candidate_names"):
-        return "present_candidates"
-
-    return "handle_unknown"
 
 def produce_answer(state: CompetencyState) -> dict:
     """확정된 레지스트리 항목에서 사용자가 요청한 정보만 답한다."""
@@ -872,7 +846,7 @@ def present_candidates(state: CompetencyState) -> dict:
 def handle_unknown(state: CompetencyState) -> dict:
     """이름과 후보를 모두 찾지 못했음을 안내한다."""
 
-    query = state.get("unknown_query", "")
+    query = state.get("raw_query", "")
 
     message = (
         "입력에서 등록된 역량이나 관련 후보를 "
@@ -922,11 +896,11 @@ builder.add_conditional_edges(
 )
 builder.add_conditional_edges(
     "find_semantic_candidates",
-    route_after_semantic_search,
+    route_after_candidates,
 )
 builder.add_conditional_edges(
     "suggest_candidates",
-    route_after_suggestions,
+    route_after_candidates,
 )
 builder.add_edge("find_competencies", "produce_answer")
 builder.add_edge("produce_answer", END)
@@ -936,7 +910,6 @@ builder.add_edge("handle_out_of_scope", END)
 
 _runtime_lock = threading.RLock()
 _runtime_stack: ExitStack | None = None
-checkpointer: BaseCheckpointSaver | None = None
 app: Any | None = None
 
 
@@ -958,7 +931,7 @@ def _open_checkpointer(
 ) -> BaseCheckpointSaver:
     """런타임 동안 유지할 PostgreSQL 체크포인터를 연다."""
 
-    # 테이블은 배포 전에 이미 만들어 두었으므로 setup()은 호출하지 않는다.
+    # 테이블은 setup_checkpoint_database.py로 미리 준비한다.
     return runtime_stack.enter_context(
         PostgresSaver.from_conn_string(_get_database_url())
     )
@@ -967,7 +940,7 @@ def _open_checkpointer(
 def initialize_competency_runtime() -> None:
     """그래프와 PostgreSQL 체크포인터를 프로세스당 한 번 준비한다."""
 
-    global app, _runtime_stack, checkpointer
+    global app, _runtime_stack
 
     with _runtime_lock:
         if app is not None:
@@ -985,21 +958,19 @@ def initialize_competency_runtime() -> None:
             raise
 
         _runtime_stack = runtime_stack
-        checkpointer = saver
         app = compiled_app
 
 
 def close_competency_runtime() -> None:
     """웹 서버 또는 CLI 종료 시 PostgreSQL 연결을 안전하게 닫는다."""
 
-    global app, _runtime_stack, checkpointer
+    global app, _runtime_stack
 
     with _runtime_lock:
         runtime_stack = _runtime_stack
 
         # 이후 호출에서 다시 초기화할 수 있도록 참조를 먼저 비운다.
         app = None
-        checkpointer = None
         _runtime_stack = None
 
         if runtime_stack is not None:
