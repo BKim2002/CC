@@ -740,14 +740,3 @@ def ask_competency(
     )
 
     return str(result["messages"][-1].content)
-
-
-if __name__ == "__main__":
-    try:
-        print(
-            ask_competency(
-                "환경긍정과 과활성의 정의를 알려줘."
-            )
-        )
-    finally:
-        close_competency_runtime()
