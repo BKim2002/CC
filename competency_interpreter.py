@@ -4,7 +4,6 @@ import os
 import re
 import threading
 from contextlib import ExitStack
-from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any, Literal, NotRequired
 
@@ -37,7 +36,6 @@ QueryType = Literal[
 LlmRoute = Literal[
     "find_competencies",
     "find_semantic_candidates",
-    "present_candidates",
     "handle_unknown",
     "handle_out_of_scope",
 ]
@@ -49,6 +47,7 @@ class ParsedNaturalLanguageQuery(BaseModel):
     competency_names: list[str] = Field(default_factory=list)
     requested_fields: list[RequestedField] = Field(default_factory=list)
     semantic_query: str | None = None
+    reuse_previous_fields: bool = False
 
 class SemanticSelection(BaseModel):
     """의미 검색 LLM이 반환할 구조화 형식."""
@@ -73,13 +72,8 @@ class CompetencyState(MessagesState):
     last_resolved_names: NotRequired[list[str]]
 
 # ---------------------------------------------------------------------------
-# 공통 레지스트리와 규칙 기반 도구
+# 공통 레지스트리와 정확 일치 도구
 # ---------------------------------------------------------------------------
-
-def normalize_text(text: str) -> str:
-    """검색 시 무시할 공백과 일부 기호를 제거한다."""
-
-    return re.sub(r"[\s_\-·.]+", "", text).lower()
 
 # lookup에는 정식 이름뿐 아니라 구역검 별칭도 들어 있다.
 # 이 딕셔너리는 정식 역량명만 key로 사용하는 조회용 딕셔너리다.
@@ -90,153 +84,49 @@ CANONICAL_LOOKUP = {
 
 CANONICAL_NAMES = sorted(CANONICAL_LOOKUP)
 
-# 자연어 문장 안에서 정식 이름과 별칭을 모두 검색하기 위한 목록이다.
-# 각 원소는 ("정규화한 검색 이름", 역량 정보) 형태의 tuple이다.
-SEARCH_ENTRIES: list[tuple[str, dict]] = [
-    (normalize_text(search_name), item)
-    for search_name, item in lookup.items()
-]
-
-# 짧은 이름이 긴 이름의 일부로 포함될 수 있으므로 긴 이름부터 확인한다.
-SEARCH_ENTRIES.sort(
-    key=lambda pair: len(pair[0]),
-    reverse=True,
-)
-
-FIELD_KEYWORDS: dict[RequestedField, tuple[str, ...]] = {
-    "definition": ("정의", "뜻", "의미"),
-    "children": (
-        "하위요인",
-        "하위 요인",
-        "구성요인",
-        "구성 요인",
-    ),
-    "path": (
-        "위계",
-        "상위요인",
-        "상위 요인",
-        "어디에 속",
-        "소속",
-    ),
-}
-
 DEFAULT_FIELDS: list[RequestedField] = [
     "definition",
     "children",
     "path",
 ]
 
-STOP_PHRASES = (
-    "하위요인",
-    "하위 요인",
-    "구성요인",
-    "구성 요인",
-    "상위요인",
-    "상위 요인",
-    "정의",
-    "뜻",
-    "의미",
-    "위계",
-    "어디에 속해",
-    "어디에 속",
-    "소속",
-    "알려줘",
-    "설명해줘",
-    "설명",
-    "뭐야",
-    "무엇이야",
-    "궁금해",
-)
+EXACT_NAME_SEPARATOR = re.compile(r"[,，\n]+")
 
-PARTICLE_PATTERN = re.compile(
-    r"(으로|에서|에게|까지|부터|처럼|보다|"
-    r"하고|이랑|랑|의|은|는|이|가|을|를|"
-    r"와|과|도|에)$"
-)
 
-FOLLOW_UP_REFERENCES = (
-    "그 역량",
-    "이 역량",
-    "그 요인",
-    "이 요인",
-    "그것",
-    "그거",
-    "그걸",
-    "해당 역량",
-)
+def extract_exact_registered_names(query: str) -> list[str]:
+    """입력 전체가 정확한 등록 이름 목록일 때만 정식 이름을 반환한다."""
 
-AFFIRMATIVE_ANSWERS = {
-    "네",
-    "예",
-    "응",
-    "맞아",
-    "맞아요",
-    "맞습니다",
-    "그래",
-    "그거",
-    "그걸로",
-}
+    stripped = query.strip()
 
-ORDINAL_PATTERNS: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (0, (r"(?<!\d)1\s*(?:번|번째)(?!\d)", r"첫\s*번째", r"첫째")),
-    (1, (r"(?<!\d)2\s*(?:번|번째)(?!\d)", r"두\s*번째", r"둘째")),
-    (2, (r"(?<!\d)3\s*(?:번|번째)(?!\d)", r"세\s*번째", r"셋째")),
-)
+    if not stripped:
+        return []
 
-def extract_registered_names(query: str) -> list[str]:
-    """자연어 문장에서 등록된 정식 역량명 또는 별칭을 찾는다."""
+    raw_names = [
+        part.strip()
+        for part in EXACT_NAME_SEPARATOR.split(stripped)
+    ]
 
-    normalized_query = normalize_text(query)
-    hits: list[tuple[int, int, dict]] = []
+    if not raw_names or any(not name for name in raw_names):
+        return []
 
-    for normalized_name, item in SEARCH_ENTRIES:
-        search_start = 0
-
-        while True:
-            position = normalized_query.find(
-                normalized_name,
-                search_start,
-            )
-
-            if position < 0:
-                break
-
-            hits.append(
-                (
-                    position,
-                    position + len(normalized_name),
-                    item,
-                )
-            )
-            search_start = position + 1
-
-    # "수인지력" 안의 "인지력"처럼 겹치는 이름은 긴 항목만 남긴다.
-    hits.sort(
-        key=lambda hit: (
-            -(hit[1] - hit[0]),
-            hit[0],
-        )
-    )
-
-    selected: list[tuple[int, int, dict]] = []
+    resolved: list[str] = []
     seen_ids: set[str] = set()
 
-    for start, end, item in hits:
-        overlaps = any(
-            start < selected_end and selected_start < end
-            for selected_start, selected_end, _ in selected
-        )
+    for raw_name in raw_names:
+        item = lookup.get(raw_name)
 
-        if item["id"] in seen_ids or overlaps:
+        # 한 항목이라도 정확히 등록된 이름/별칭이 아니면 전체 문장을
+        # 자연어 질의로 보고 LLM 파서에 맡긴다.
+        if item is None:
+            return []
+
+        if item["id"] in seen_ids:
             continue
 
-        selected.append((start, end, item))
+        resolved.append(item["name"])
         seen_ids.add(item["id"])
 
-    # 최종 답변은 사용자가 문장에서 언급한 순서를 유지한다.
-    selected.sort(key=lambda hit: hit[0])
-
-    return [item["name"] for _, _, item in selected]
+    return resolved
 
 def normalize_requested_fields(
     fields: list[str],
@@ -253,86 +143,6 @@ def normalize_requested_fields(
         normalized.append(field)  # type: ignore[arg-type]
 
     return normalized
-
-def has_explicit_field_request(query: str) -> bool:
-    """사용자가 이번 문장에서 정보 종류를 직접 말했는지 확인한다."""
-
-    return any(
-        keyword in query
-        for keywords in FIELD_KEYWORDS.values()
-        for keyword in keywords
-    )
-
-def detect_requested_fields(query: str) -> list[RequestedField]:
-    """질문에서 사용자가 원하는 정보의 종류를 판별한다."""
-
-    requested_fields: list[RequestedField] = []
-
-    for field, keywords in FIELD_KEYWORDS.items():
-        if any(keyword in query for keyword in keywords):
-            requested_fields.append(field)
-
-    # 정보 종류가 명시되지 않으면 전체 정보를 출력한다.
-    if not requested_fields:
-        requested_fields = DEFAULT_FIELDS.copy()
-
-    return requested_fields
-
-def extract_candidate_tokens(query: str) -> list[str]:
-    """오타 후보 검색에 사용할 핵심 단어를 질문에서 추출한다."""
-
-    cleaned = query
-
-    for phrase in STOP_PHRASES:
-        cleaned = cleaned.replace(phrase, " ")
-
-    cleaned = re.sub(r"[^0-9A-Za-z가-힣_\-]+", " ", cleaned)
-
-    tokens: list[str] = []
-
-    for raw_token in cleaned.split():
-        token = raw_token
-        previous = None
-
-        # "성실셩의"처럼 단어 뒤에 붙은 한국어 조사를 제거한다.
-        while token != previous:
-            previous = token
-            token = PARTICLE_PATTERN.sub("", token)
-
-        if len(normalize_text(token)) >= 2:
-            tokens.append(token)
-
-    return tokens
-
-def suggest_names(
-    query: str,
-    threshold: float = 0.65,
-    limit: int = 3,
-) -> list[str]:
-    """질문의 핵심 단어와 유사한 정식 역량명을 후보로 반환한다."""
-
-    scores: dict[str, float] = {}
-
-    for token in extract_candidate_tokens(query):
-        normalized_token = normalize_text(token)
-
-        for name in CANONICAL_NAMES:
-            score = SequenceMatcher(
-                None,
-                normalized_token,
-                normalize_text(name),
-            ).ratio()
-
-            if score >= threshold:
-                scores[name] = max(score, scores.get(name, 0.0))
-
-    sorted_names = sorted(
-        scores,
-        key=lambda name: scores[name],
-        reverse=True,
-    )
-
-    return sorted_names[:limit]
 
 def validate_registry_names(names: list[str]) -> list[str]:
     """LLM이 반환한 이름을 레지스트리에서 다시 검증한다."""
@@ -353,72 +163,8 @@ def validate_registry_names(names: list[str]) -> list[str]:
     return validated
 
 # ---------------------------------------------------------------------------
-# 대화 맥락 해석
-# ---------------------------------------------------------------------------
-
-def ordinal_index(query: str) -> int | None:
-    """'1번', '두 번째' 같은 후보 번호를 0부터 시작하는 값으로 바꾼다."""
-
-    stripped = query.strip()
-
-    if stripped in {"1", "2", "3"}:
-        return int(stripped) - 1
-
-    for index, patterns in ORDINAL_PATTERNS:
-        if any(re.search(pattern, query) for pattern in patterns):
-            return index
-
-    return None
-
-def resolve_follow_up(
-    query: str,
-    previous_candidates: list[str],
-    previous_names: list[str],
-) -> list[str]:
-    """이전 후보/답변을 이용해 생략된 역량명을 복원한다."""
-
-    if previous_candidates:
-        index = ordinal_index(query)
-
-        if index is not None and index < len(previous_candidates):
-            return [previous_candidates[index]]
-
-        normalized_query = normalize_text(query)
-        is_affirmative = normalized_query in {
-            normalize_text(answer)
-            for answer in AFFIRMATIVE_ANSWERS
-        }
-        refers_to_one = any(
-            phrase in query
-            for phrase in FOLLOW_UP_REFERENCES
-        )
-
-        if len(previous_candidates) == 1 and (
-            is_affirmative or refers_to_one
-        ):
-            return [previous_candidates[0]]
-
-    if previous_names:
-        refers_to_previous = any(
-            phrase in query
-            for phrase in FOLLOW_UP_REFERENCES
-        )
-
-        # "하위요인도 알려줘"처럼 정보 종류만 이어서 말한 경우도
-        # 직전에 확정된 역량을 대상으로 본다.
-        if refers_to_previous or has_explicit_field_request(query):
-            return previous_names
-
-    return []
-
-# ---------------------------------------------------------------------------
 # OpenAI 구조화 출력 준비
 # ---------------------------------------------------------------------------
-
-def openai_is_configured() -> bool:
-    """API 키의 실제 값을 노출하지 않고 설정 여부만 확인한다."""
-
-    return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 def selected_model_name() -> str:
     """환경 변수로 모델을 바꿀 수 있게 하되 기본값을 제공한다."""
@@ -456,7 +202,14 @@ def _semantic_selector_for(model_name: str):
     )
 
 REGISTRY_NAME_LIST = "\n".join(
-    f"- {name}"
+    (
+        f"- {name}"
+        + (
+            f" (등록 별칭: {', '.join(CANONICAL_LOOKUP[name].get('aliases', []))})"
+            if CANONICAL_LOOKUP[name].get("aliases")
+            else ""
+        )
+    )
     for name in CANONICAL_NAMES
 )
 
@@ -488,74 +241,66 @@ REGISTRY_CATALOG = build_registry_catalog()
 # ---------------------------------------------------------------------------
 
 def interpret_query(state: CompetencyState) -> dict:
-    """현재 질문을 규칙으로 먼저 해석하고 후속 질문을 복원한다."""
+    """입력 전체가 정확한 등록 이름인지 여부만 Python으로 판별한다."""
 
     query = str(state["messages"][-1].content).strip()
+    resolved_names = extract_exact_registered_names(query)
 
-    previous_fields = list(state.get("requested_fields", []))
-    previous_candidates = list(state.get("candidate_names", []))
-    previous_names = list(state.get("last_resolved_names", []))
+    updates: dict[str, Any] = {
+        "raw_query": query,
+        "resolved_names": resolved_names,
+        "matched_items": [],
+        "semantic_query": "",
+    }
 
-    requested_fields = detect_requested_fields(query)
-    explicit_fields = has_explicit_field_request(query)
-    resolved_names = extract_registered_names(query)
-    continued_from_previous = False
-
-    if not resolved_names:
-        resolved_names = resolve_follow_up(
-            query,
-            previous_candidates,
-            previous_names,
+    if resolved_names:
+        previous_candidates = validate_registry_names(
+            list(state.get("candidate_names", []))
         )
-        continued_from_previous = bool(resolved_names)
-    elif previous_candidates:
-        # 후보 목록 다음 턴에 사용자가 정확한 이름만 입력한 경우다.
-        continued_from_previous = any(
+        previous_fields = normalize_requested_fields(
+            list(state.get("requested_fields", []))
+        )
+        selected_previous_candidate = any(
             name in previous_candidates
             for name in resolved_names
         )
 
-    # "1번"처럼 정보 종류가 생략된 후속 질문은 앞선 요청을 이어받는다.
-    if (
-        continued_from_previous
-        and not explicit_fields
-        and previous_fields
-    ):
-        requested_fields = normalize_requested_fields(previous_fields)
+        updates["requested_fields"] = (
+            previous_fields
+            if selected_previous_candidate and previous_fields
+            else DEFAULT_FIELDS.copy()
+        )
+        updates["candidate_names"] = []
 
-        if not requested_fields:
-            requested_fields = DEFAULT_FIELDS.copy()
+    return updates
 
-    return {
-        "raw_query": query,
-        "requested_fields": requested_fields,
-        "resolved_names": resolved_names,
-        "matched_items": [],
-        "candidate_names": [],
-        "semantic_query": "",
-    }
 
 def route_after_interpret(
     state: CompetencyState,
 ) -> Literal[
     "find_competencies",
     "llm_interpret_query",
-    "suggest_candidates",
 ]:
-    """정확한 이름, API 사용 가능 여부에 따라 다음 노드를 선택한다."""
+    """정확한 이름만 Python 경로로 보내고 나머지는 모두 LLM으로 보낸다."""
 
     if state.get("resolved_names"):
         return "find_competencies"
 
-    if openai_is_configured():
-        return "llm_interpret_query"
-
-    return "suggest_candidates"
+    return "llm_interpret_query"
 
 def llm_interpret_query(state: CompetencyState) -> dict:
     """구조화 출력으로 질문의 종류와 요청 필드를 분류한다."""
 
     query = state.get("raw_query", "")
+    previous_candidates = validate_registry_names(
+        list(state.get("candidate_names", []))
+    )
+    previous_names = validate_registry_names(
+        list(state.get("last_resolved_names", []))
+    )
+    previous_fields = normalize_requested_fields(
+        list(state.get("requested_fields", []))
+    )
 
     system_prompt = f"""
 당신은 역량 레지스트리 질의를 분류하는 파서입니다.
@@ -570,40 +315,41 @@ def llm_interpret_query(state: CompetencyState) -> dict:
 4. competency_names에는 아래 목록에 있는 정식 이름만 넣습니다.
 5. requested_fields는 definition, children, path 중 요청한 것만 넣습니다.
 6. semantic_search이면 semantic_query에 사용자의 검색 의도를 짧게 적습니다.
-7. 정의를 직접 만들거나 추측하지 마세요.
+7. 사용자가 앞선 후보의 번호나 이름을 선택하면 이전 후보 목록에서 정식 이름을
+   찾아 competency_names에 넣고 named_lookup으로 분류합니다.
+8. "그 역량", "그거"처럼 앞선 대상을 가리키면 이전 확정 역량을
+   competency_names에 넣고 named_lookup으로 분류합니다.
+9. 후속 질문에서 정보 종류를 새로 말하지 않았다면 reuse_previous_fields를
+   true로 설정합니다. 그 외에는 false입니다.
+10. 정의를 직접 만들거나 추측하지 마세요.
 
-허용된 정식 역량명:
+이전 대화 문맥:
+- 이전 확정 역량: {previous_names or '없음'}
+- 이전 후보 목록: {previous_candidates or '없음'}
+- 이전 요청 필드: {previous_fields or '없음'}
+
+허용된 정식 역량명과 등록 별칭:
 {REGISTRY_NAME_LIST}
 """.strip()
 
-    try:
-        parsed = _query_parser_for(
-            selected_model_name()
-        ).invoke(
-            [
-                ("system", system_prompt),
-                ("human", query),
-            ]
-        )
-    except Exception:
-        candidates = suggest_names(query)
-
-        return {
-            "candidate_names": candidates,
-            "llm_route": (
-                "present_candidates"
-                if candidates
-                else "handle_unknown"
-            ),
-        }
+    parsed = _query_parser_for(
+        selected_model_name()
+    ).invoke(
+        [
+            ("system", system_prompt),
+            ("human", query),
+        ]
+    )
 
     parsed_fields = normalize_requested_fields(
         list(parsed.requested_fields)
     )
 
     if not parsed_fields:
-        parsed_fields = list(
-            state.get("requested_fields", DEFAULT_FIELDS)
+        parsed_fields = (
+            previous_fields
+            if parsed.reuse_previous_fields and previous_fields
+            else DEFAULT_FIELDS.copy()
         )
 
     if parsed.query_type == "named_lookup":
@@ -615,27 +361,14 @@ def llm_interpret_query(state: CompetencyState) -> dict:
             return {
                 "resolved_names": names,
                 "requested_fields": parsed_fields,
+                "candidate_names": [],
                 "llm_route": "find_competencies",
             }
 
-        candidates = suggest_names(query)
-
-        if candidates:
-            return {
-                "candidate_names": candidates,
-                "requested_fields": parsed_fields,
-                "llm_route": "present_candidates",
-            }
-
-        semantic_query = (
-            parsed.semantic_query
-            or query
-        ).strip()
-
         return {
-            "semantic_query": semantic_query,
             "requested_fields": parsed_fields,
-            "llm_route": "find_semantic_candidates",
+            "candidate_names": [],
+            "llm_route": "handle_unknown",
         }
 
     if parsed.query_type == "semantic_search":
@@ -647,20 +380,12 @@ def llm_interpret_query(state: CompetencyState) -> dict:
         return {
             "semantic_query": semantic_query,
             "requested_fields": parsed_fields,
+            "candidate_names": [],
             "llm_route": "find_semantic_candidates",
         }
 
-    # LLM이 범위 밖으로 분류했더라도 뚜렷한 오타 후보는 먼저 살린다.
-    candidates = suggest_names(query)
-
-    if candidates:
-        return {
-            "candidate_names": candidates,
-            "requested_fields": parsed_fields,
-            "llm_route": "present_candidates",
-        }
-
     return {
+        "candidate_names": [],
         "llm_route": "handle_out_of_scope",
     }
 
@@ -687,22 +412,17 @@ def find_semantic_candidates(state: CompetencyState) -> dict:
 {REGISTRY_CATALOG}
 """.strip()
 
-    try:
-        selection = _semantic_selector_for(
-            selected_model_name()
-        ).invoke(
-            [
-                ("system", system_prompt),
-                ("human", semantic_query),
-            ]
-        )
-        candidates = validate_registry_names(
-            selection.candidate_names
-        )[:3]
-    except Exception:
-        candidates = suggest_names(
-            state.get("raw_query", "")
-        )
+    selection = _semantic_selector_for(
+        selected_model_name()
+    ).invoke(
+        [
+            ("system", system_prompt),
+            ("human", semantic_query),
+        ]
+    )
+    candidates = validate_registry_names(
+        selection.candidate_names
+    )[:3]
 
     return {
         "candidate_names": candidates,
@@ -743,17 +463,6 @@ def find_competencies(state: CompetencyState) -> dict:
             for item in matched_items
         ],
         "candidate_names": [],
-    }
-
-def suggest_candidates(state: CompetencyState) -> dict:
-    """정확한 이름이 없을 때 철자가 비슷한 정식 역량명을 찾는다."""
-
-    candidate_names = suggest_names(
-        state.get("raw_query", "")
-    )
-
-    return {
-        "candidate_names": candidate_names,
     }
 
 def produce_answer(state: CompetencyState) -> dict:
@@ -879,7 +588,6 @@ builder.add_node("interpret_query", interpret_query)
 builder.add_node("llm_interpret_query", llm_interpret_query)
 builder.add_node("find_semantic_candidates", find_semantic_candidates)
 builder.add_node("find_competencies", find_competencies)
-builder.add_node("suggest_candidates", suggest_candidates)
 builder.add_node("produce_answer", produce_answer)
 builder.add_node("present_candidates", present_candidates)
 builder.add_node("handle_unknown", handle_unknown)
@@ -896,10 +604,6 @@ builder.add_conditional_edges(
 )
 builder.add_conditional_edges(
     "find_semantic_candidates",
-    route_after_candidates,
-)
-builder.add_conditional_edges(
-    "suggest_candidates",
     route_after_candidates,
 )
 builder.add_edge("find_competencies", "produce_answer")
@@ -1036,14 +740,3 @@ def ask_competency(
     )
 
     return str(result["messages"][-1].content)
-
-
-if __name__ == "__main__":
-    try:
-        print(
-            ask_competency(
-                "환경긍정과 과활성의 정의를 알려줘."
-            )
-        )
-    finally:
-        close_competency_runtime()

@@ -16,6 +16,68 @@ import web_api
 from web_api import app
 
 
+class QueryParserStub:
+    """웹 API 테스트에서 자연어를 결정적으로 구조화한다."""
+
+    def invoke(
+        self,
+        messages: list[tuple[str, str]],
+    ) -> interpreter.ParsedNaturalLanguageQuery:
+        system_prompt = messages[0][1]
+        query = messages[-1][1]
+
+        if query == "성실성의 정의를 알려줘.":
+            return interpreter.ParsedNaturalLanguageQuery(
+                query_type="named_lookup",
+                competency_names=["성실성"],
+                requested_fields=["definition"],
+            )
+
+        if query == "공감성의 정의를 알려줘.":
+            return interpreter.ParsedNaturalLanguageQuery(
+                query_type="named_lookup",
+                competency_names=["공감성"],
+                requested_fields=["definition"],
+            )
+
+        if query == "그 역량의 하위요인도 알려줘.":
+            previous_name = "- 이전 확정 역량: ['성실성']"
+
+            if previous_name in system_prompt:
+                return interpreter.ParsedNaturalLanguageQuery(
+                    query_type="named_lookup",
+                    competency_names=["성실성"],
+                    requested_fields=["children"],
+                )
+
+            return interpreter.ParsedNaturalLanguageQuery(
+                query_type="out_of_scope",
+            )
+
+        if query == "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?":
+            return interpreter.ParsedNaturalLanguageQuery(
+                query_type="semantic_search",
+                requested_fields=["definition"],
+                semantic_query="맡은 일을 꼼꼼하게 수행하는 역량",
+            )
+
+        return interpreter.ParsedNaturalLanguageQuery(
+            query_type="out_of_scope",
+        )
+
+
+class SemanticSelectorStub:
+    """의미 검색 결과를 실제 OpenAI 호출 없이 고정한다."""
+
+    def invoke(
+        self,
+        _: list[tuple[str, str]],
+    ) -> interpreter.SemanticSelection:
+        return interpreter.SemanticSelection(
+            candidate_names=["성실성"]
+        )
+
+
 @pytest.fixture()
 def client(
     tmp_path: Path,
@@ -45,6 +107,16 @@ def client(
         interpreter,
         "_open_checkpointer",
         open_test_checkpointer,
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_query_parser_for",
+        lambda _: QueryParserStub(),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_semantic_selector_for",
+        lambda _: SemanticSelectorStub(),
     )
     monkeypatch.setenv("OPENAI_API_KEY", "")
 
@@ -149,7 +221,7 @@ def test_invalid_thread_id_is_rejected(client: TestClient) -> None:
     assert history_response.status_code == 422
 
 
-def test_exact_query_and_conversation_restore(
+def test_natural_language_query_and_conversation_restore(
     client: TestClient,
 ) -> None:
     thread_id = create_thread(client)
@@ -246,7 +318,7 @@ def test_candidate_state_and_candidate_selection(
     candidate_response = client.post(
         "/api/chat",
         json={
-            "message": "성실셩의 정의를 알려줘.",
+            "message": "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?",
             "thread_id": thread_id,
         },
     )
