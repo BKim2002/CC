@@ -22,14 +22,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if not __package__ and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-if __package__:
-    from scripts.build_registry import RegistryError, build_registry
-    from scripts.registry_diff import RegistryDiff, diff_registries
-    from scripts.registry_source_v2 import parse_source_v2_text
-else:  # pragma: no cover - 직접 스크립트 실행 경로
-    from build_registry import RegistryError, build_registry  # type: ignore[no-redef]
-    from registry_diff import RegistryDiff, diff_registries  # type: ignore[no-redef]
-    from registry_source_v2 import parse_source_v2_text  # type: ignore[no-redef]
+from scripts.build_registry import RegistryError, build_registry
+from scripts.registry_diff import RegistryDiff, diff_registries
+from scripts.registry_source_v2 import parse_source_v2_text
 
 from competency_registry import validate_registry_document
 

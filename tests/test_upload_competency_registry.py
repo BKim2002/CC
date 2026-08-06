@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
+import sys
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -13,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from competency_registry import RegistryValidationError
 from scripts import upload_competency_registry as uploader
+from scripts.registry_source_v2 import SourceRegistry, render_source_v2
 
 
 class FakeCursor:
@@ -318,6 +321,57 @@ def test_plain_dry_run_never_connects_to_database(
     assert result.item_count == 1
     assert result.registry_diff is None
     assert seen_formats == ["markdown-v2"]
+
+
+def test_direct_script_v2_dry_run_uses_canonical_package_imports(
+    tmp_path: Path,
+) -> None:
+    source = SourceRegistry.model_validate(
+        {
+            "source_schema_version": "2.0",
+            "registry_schema_version": "1.0",
+            "instruments": [{"id": "synthetic", "label": "합성 검사"}],
+            "items": [
+                {
+                    "id": "synthetic:root",
+                    "name": "합성 루트",
+                    "instrument": "synthetic",
+                    "node_type": "root",
+                    "parent_id": None,
+                    "order": 0,
+                    "definition": "합성 정의",
+                    "aliases": [],
+                    "analysis_included": False,
+                    "status": "active",
+                    "replacement_id": None,
+                    "notes": [],
+                }
+            ],
+        },
+        strict=True,
+    )
+    source_path = tmp_path / "source-v2.md"
+    source_path.write_text(render_source_v2(source), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(uploader.PROJECT_ROOT / "scripts" / "upload_competency_registry.py"),
+            "--source",
+            str(source_path),
+            "--source-format",
+            "markdown-v2",
+            "--dry-run",
+        ],
+        cwd=uploader.PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "item_count: 1" in completed.stdout
 
 
 def test_dry_run_with_diff_uses_read_only_connection(
