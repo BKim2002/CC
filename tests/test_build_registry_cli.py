@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts import build_registry as builder
+from scripts import registry_source_v1 as legacy
 
 
 @pytest.fixture
@@ -59,6 +60,66 @@ def test_source_argument_is_required() -> None:
         builder.parse_args([])
 
 
+def test_source_format_is_explicit_and_defaults_to_v1() -> None:
+    default_args = builder.parse_args(["--source", "source.md"])
+    v2_args = builder.parse_args(
+        [
+            "--source",
+            "source.md",
+            "--source-format",
+            "markdown-v2",
+        ]
+    )
+
+    assert default_args.source_format == "markdown-v1"
+    assert v2_args.source_format == "markdown-v2"
+
+
+def test_dispatcher_does_not_guess_source_format(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    generated_registry: dict[str, object],
+) -> None:
+    source = tmp_path / "looks-like-v2.md"
+    source.write_text(
+        "```yaml\nsource_schema: competency-registry/v2\n```",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def build_v1(path: Path) -> dict[str, object]:
+        calls.append(f"v1:{path.name}")
+        return generated_registry
+
+    def build_v2(path: Path) -> dict[str, object]:
+        calls.append(f"v2:{path.name}")
+        return generated_registry
+
+    monkeypatch.setattr(builder, "build_registry_v1", build_v1)
+    monkeypatch.setattr(builder, "_build_registry_v2", build_v2)
+
+    assert builder.build_registry(source) is generated_registry
+    assert (
+        builder.build_registry(source, source_format="markdown-v2")
+        is generated_registry
+    )
+    assert calls == ["v1:looks-like-v2.md", "v2:looks-like-v2.md"]
+
+
+def test_dispatcher_rejects_unknown_source_format(tmp_path: Path) -> None:
+    with pytest.raises(builder.RegistryError, match="지원하지 않는"):
+        builder.build_registry(
+            tmp_path / "source.md",
+            source_format="auto",
+        )
+
+
+def test_legacy_public_imports_are_reexported() -> None:
+    assert builder.RegistryError is legacy.RegistryError
+    assert builder.EXPECTED_COUNTS is legacy.EXPECTED_COUNTS
+    assert builder.validate_items is legacy.validate_items
+
+
 def test_no_output_path_performs_validation_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -70,12 +131,51 @@ def test_no_output_path_performs_validation_only(
     monkeypatch.setattr(
         builder,
         "build_registry",
-        lambda path: generated_registry,
+        lambda path, source_format="markdown-v1": generated_registry,
     )
 
     assert builder.main(["--source", str(source)]) == 0
     assert "검증 완료" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == [source]
+
+
+def test_cli_count_output_does_not_assume_legacy_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source-v2.md"
+    source.write_text("source", encoding="utf-8")
+    registry = {
+        "source": {"sha256": "b" * 64},
+        "validation": {
+            "status": "passed",
+            "counts": {"active": 63, "retired": 2, "total": 65},
+        },
+        "items": [],
+    }
+    seen_formats: list[str] = []
+
+    def fake_build(path: Path, source_format: str) -> dict[str, object]:
+        seen_formats.append(source_format)
+        return registry
+
+    monkeypatch.setattr(builder, "build_registry", fake_build)
+
+    assert (
+        builder.main(
+            [
+                "--source",
+                str(source),
+                "--source-format",
+                "markdown-v2",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "active 63, retired 2, total 65" in output
+    assert seen_formats == ["markdown-v2"]
 
 
 def test_output_and_explicit_check_paths(
@@ -89,7 +189,7 @@ def test_output_and_explicit_check_paths(
     monkeypatch.setattr(
         builder,
         "build_registry",
-        lambda path: generated_registry,
+        lambda path, source_format="markdown-v1": generated_registry,
     )
 
     assert (
@@ -119,7 +219,7 @@ def test_output_and_check_are_mutually_exclusive(
     monkeypatch.setattr(
         builder,
         "build_registry",
-        lambda path: generated_registry,
+        lambda path, source_format="markdown-v1": generated_registry,
     )
 
     with pytest.raises(builder.RegistryError, match="동시에"):
@@ -133,6 +233,24 @@ def test_output_and_check_are_mutually_exclusive(
                 str(output),
             ]
         )
+
+
+def test_direct_cli_failure_hides_source_and_exception_details(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    private_value = "TOP_SECRET_SOURCE_CONTENT"
+
+    def failing_main(argv: object = None) -> int:
+        raise RuntimeError(private_value)
+
+    monkeypatch.setattr(builder, "main", failing_main)
+
+    assert builder._cli() == 1
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "변환 또는 검증에 실패했습니다" in combined
+    assert private_value not in combined
 
 
 @pytest.mark.parametrize(
@@ -176,9 +294,9 @@ def test_validate_items_uses_one_global_lookup_namespace(
     second: dict[str, object],
     expected_message: str,
 ) -> None:
-    monkeypatch.setattr(builder, "EXPECTED_COUNTS", {"total": 2})
-    monkeypatch.setattr(builder, "EXPECTED_LEVEL_1_CHILDREN", {})
-    monkeypatch.setattr(builder, "STRATEGY_LEVEL_3", ())
+    monkeypatch.setattr(legacy, "EXPECTED_COUNTS", {"total": 2})
+    monkeypatch.setattr(legacy, "EXPECTED_LEVEL_1_CHILDREN", {})
+    monkeypatch.setattr(legacy, "STRATEGY_LEVEL_3", ())
 
     with pytest.raises(builder.RegistryError, match=expected_message):
-        builder.validate_items([first, second])  # type: ignore[list-item]
+        legacy.validate_items([first, second])  # type: ignore[list-item]
