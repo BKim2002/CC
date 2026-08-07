@@ -19,7 +19,7 @@ const elements = {
 
 let threadId = null;
 let isLoading = false;
-let loadingMessage = null;
+let activeRequest = null;
 
 
 function isUuid(value) {
@@ -53,7 +53,8 @@ function setLoading(loading) {
   isLoading = loading;
   elements.messageInput.disabled = loading;
   elements.sendButton.disabled = loading;
-  elements.newThreadButton.disabled = loading;
+  // 답변 생성 중에는 이 버튼이 현재 요청을 취소하고 새 대화를 만든다.
+  elements.newThreadButton.disabled = loading && activeRequest === null;
   elements.messageList.setAttribute("aria-busy", String(loading));
 
   for (const button of elements.candidateList.querySelectorAll("button")) {
@@ -125,7 +126,7 @@ function appendMessage(role, content) {
 
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
-  bubble.textContent = content;
+  setBubbleText(bubble, content);
 
   group.append(label, bubble);
   row.append(group);
@@ -136,28 +137,32 @@ function appendMessage(role, content) {
 }
 
 
-function appendLoadingMessage() {
-  const row = appendMessage("assistant", "");
-  const bubble = row.querySelector(".message-bubble");
-  bubble.classList.add("loading-bubble");
-  bubble.setAttribute("aria-label", "답변을 준비하고 있습니다");
-
-  for (let index = 0; index < 3; index += 1) {
-    const dot = document.createElement("span");
-    dot.className = "typing-dot";
-    dot.setAttribute("aria-hidden", "true");
-    bubble.append(dot);
-  }
-
-  loadingMessage = row;
+function setBubbleText(bubble, content) {
+  const text = String(content || "");
+  bubble.textContent = text;
+  bubble.classList.toggle(
+    "tree-content",
+    /(^|\n)\s*[├└│]/u.test(text),
+  );
 }
 
 
-function removeLoadingMessage() {
-  if (loadingMessage) {
-    loadingMessage.remove();
-    loadingMessage = null;
-  }
+function appendStreamingMessage() {
+  const row = appendMessage("assistant", "");
+  const bubble = row.querySelector(".message-bubble");
+  bubble.classList.add("streaming-bubble");
+  bubble.setAttribute("aria-label", "답변을 작성하고 있습니다");
+  elements.messageList.setAttribute("aria-live", "off");
+
+  return { row, bubble };
+}
+
+
+function finishStreamingMessage(bubble, content) {
+  setBubbleText(bubble, content);
+  bubble.classList.remove("streaming-bubble");
+  bubble.removeAttribute("aria-label");
+  elements.messageList.setAttribute("aria-live", "polite");
 }
 
 
@@ -233,6 +238,206 @@ async function requestJson(url, options = {}) {
 }
 
 
+function parseSseFrame(frame) {
+  let eventName = "message";
+  const dataLines = [];
+
+  for (const line of frame.split(/\r\n|\n|\r/u)) {
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+    const field = separatorIndex < 0 ? line : line.slice(0, separatorIndex);
+    let value = separatorIndex < 0 ? "" : line.slice(separatorIndex + 1);
+
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+
+    if (field === "event") {
+      eventName = value;
+    } else if (field === "data") {
+      dataLines.push(value);
+    }
+  }
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(dataLines.join("\n"));
+  } catch (error) {
+    throw new Error("서버의 실시간 응답 형식을 읽지 못했습니다.", {
+      cause: error,
+    });
+  }
+
+  return { event: eventName, data };
+}
+
+
+async function readSseEvents(response, handleEvent) {
+  if (!response.body) {
+    throw new Error("이 브라우저에서는 실시간 답변을 받을 수 없습니다.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  const consumeFrames = (flush = false) => {
+    while (true) {
+      const boundary = /\r\n\r\n|\n\n|\r\r/u.exec(buffer);
+
+      if (!boundary) {
+        break;
+      }
+
+      const frame = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
+      const parsed = parseSseFrame(frame);
+
+      if (parsed) {
+        handleEvent(parsed.event, parsed.data);
+      }
+    }
+
+    if (flush && buffer.trim()) {
+      const parsed = parseSseFrame(buffer);
+      buffer = "";
+
+      if (parsed) {
+        handleEvent(parsed.event, parsed.data);
+      }
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+
+      if (done) {
+        buffer += decoder.decode();
+        consumeFrames(true);
+        return;
+      }
+
+      // stream:true가 한글 UTF-8 문자의 임의 byte chunk 경계를 보존한다.
+      buffer += decoder.decode(value, { stream: true });
+      consumeFrames();
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+
+async function responseError(response) {
+  let data = null;
+
+  try {
+    data = await response.json();
+  } catch {
+    // JSON이 아닌 proxy 오류도 아래의 일반 메시지로 안전하게 처리한다.
+  }
+
+  return new Error(
+    validationMessage(data?.detail) || "요청을 처리하지 못했습니다.",
+  );
+}
+
+
+async function streamQuestion(question, controller, bubble) {
+  let response;
+
+  try {
+    response = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: question,
+        thread_id: threadId,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw error;
+    }
+
+    throw new Error(
+      "서버에 연결할 수 없습니다. 서버 실행 상태를 확인해 주세요.",
+      { cause: error },
+    );
+  }
+
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+
+  let visibleAnswer = "";
+  let doneData = null;
+  let streamError = null;
+
+  await readSseEvents(response, (eventName, data) => {
+    if (!data || typeof data !== "object") {
+      return;
+    }
+
+    if (eventName === "status" && typeof data.stage === "string") {
+      setStatus(data.stage, "loading");
+      return;
+    }
+
+    if (eventName === "delta" && typeof data.text === "string") {
+      visibleAnswer += data.text;
+      setBubbleText(bubble, visibleAnswer);
+      scrollToLatest();
+      return;
+    }
+
+    if (eventName === "replace" && typeof data.answer === "string") {
+      visibleAnswer = data.answer;
+      setBubbleText(bubble, visibleAnswer);
+      scrollToLatest();
+      return;
+    }
+
+    if (eventName === "done" && typeof data.answer === "string") {
+      visibleAnswer = data.answer;
+      doneData = data;
+      return;
+    }
+
+    if (eventName === "error") {
+      streamError = new Error(
+        typeof data.message === "string"
+          ? data.message
+          : "실시간 답변을 완료하지 못했습니다. 다시 시도해 주세요.",
+      );
+    }
+  });
+
+  if (streamError) {
+    throw streamError;
+  }
+
+  if (!doneData) {
+    throw new Error("실시간 연결이 일찍 종료되었습니다. 다시 시도해 주세요.");
+  }
+
+  finishStreamingMessage(bubble, doneData.answer);
+  return doneData;
+}
+
+
 async function createThread() {
   const data = await requestJson("/api/threads", {
     method: "POST",
@@ -302,7 +507,10 @@ async function sendQuestion(rawQuestion) {
   }
 
   clearError();
+  const controller = new AbortController();
+  activeRequest = controller;
   setLoading(true);
+  let streamMessage = null;
 
   try {
     if (!isUuid(threadId)) {
@@ -312,25 +520,26 @@ async function sendQuestion(rawQuestion) {
     appendMessage("user", question);
     renderCandidates([]);
     elements.messageInput.value = "";
-    appendLoadingMessage();
+    streamMessage = appendStreamingMessage();
 
-    const data = await requestJson("/api/chat", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message: question,
-        thread_id: threadId,
-      }),
-    });
+    const data = await streamQuestion(
+      question,
+      controller,
+      streamMessage.bubble,
+    );
 
-    removeLoadingMessage();
-    appendMessage("assistant", data.answer);
     renderCandidates(data.candidates || []);
-    elements.liveAnnouncement.textContent = "새 답변이 도착했습니다.";
+    elements.liveAnnouncement.textContent = (
+      `새 답변이 도착했습니다. ${data.answer}`
+    );
   } catch (error) {
-    removeLoadingMessage();
+    if (error.name === "AbortError") {
+      return;
+    }
+
+    if (streamMessage?.row?.isConnected) {
+      streamMessage.row.remove();
+    }
 
     if (isUuid(threadId)) {
       try {
@@ -342,16 +551,23 @@ async function sendQuestion(rawQuestion) {
 
     showError(error.message || "알 수 없는 오류가 발생했습니다.");
   } finally {
-    setLoading(false);
-    elements.messageInput.focus();
-    scrollToLatest();
+    elements.messageList.setAttribute("aria-live", "polite");
+
+    if (activeRequest === controller) {
+      activeRequest = null;
+      setLoading(false);
+      elements.messageInput.focus();
+      scrollToLatest();
+    }
   }
 }
 
 
 async function startNewConversation() {
-  if (isLoading) {
-    return;
+  if (activeRequest) {
+    const controller = activeRequest;
+    activeRequest = null;
+    controller.abort();
   }
 
   clearError();
@@ -363,6 +579,19 @@ async function startNewConversation() {
     showWelcome();
     elements.liveAnnouncement.textContent = "새 대화를 시작했습니다.";
   } catch (error) {
+    if (isUuid(threadId)) {
+      try {
+        // If the previous stream was aborted after provisional deltas, restore
+        // only checkpointed messages instead of leaving the partial bubble.
+        await restoreConversation();
+      } catch {
+        const partialBubble = elements.messageList.querySelector(
+          ".message-row.assistant .streaming-bubble",
+        );
+        partialBubble?.closest(".message-row")?.remove();
+      }
+    }
+
     showError(error.message || "새 대화를 시작하지 못했습니다.");
   } finally {
     setLoading(false);
