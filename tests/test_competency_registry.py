@@ -97,9 +97,11 @@ def test_snapshot_recursively_freezes_shared_registry_items() -> None:
     document_item = snapshot.document["items"][0]
     canonical_item = snapshot.canonical_lookup["역량 알파"]
     alias_item = snapshot.lookup["알파"]
+    id_item = snapshot.id_lookup["synthetic:alpha"]
 
     assert document_item is canonical_item
     assert canonical_item is alias_item
+    assert alias_item is id_item
 
     with pytest.raises(TypeError):
         canonical_item["definition"] = "변조"  # type: ignore[index]

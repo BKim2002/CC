@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import re
 import sqlite3
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -13,7 +17,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import competency_interpreter as interpreter
 import web_api
-from competency_registry import RegistrySnapshot
+from competency_query import ItemField, ParsedRegistryQuery, QueryIntent
+from competency_registry import RegistrySnapshot, build_registry_snapshot
 from web_api import app
 
 
@@ -23,48 +28,44 @@ class QueryParserStub:
     def invoke(
         self,
         messages: list[tuple[str, str]],
-    ) -> interpreter.ParsedNaturalLanguageQuery:
+    ) -> ParsedRegistryQuery:
         system_prompt = messages[0][1]
         query = messages[-1][1]
 
         if query == "성실성의 정의를 알려줘.":
-            return interpreter.ParsedNaturalLanguageQuery(
-                query_type="named_lookup",
-                competency_names=["성실성"],
-                requested_fields=["definition"],
+            return ParsedRegistryQuery(
+                intent=QueryIntent.ITEM_LOOKUP,
+                target_names=["성실성"],
+                fields=[ItemField.DEFINITION],
             )
 
         if query == "공감성의 정의를 알려줘.":
-            return interpreter.ParsedNaturalLanguageQuery(
-                query_type="named_lookup",
-                competency_names=["공감성"],
-                requested_fields=["definition"],
+            return ParsedRegistryQuery(
+                intent=QueryIntent.ITEM_LOOKUP,
+                target_names=["공감성"],
+                fields=[ItemField.DEFINITION],
             )
 
         if query == "그 역량의 하위요인도 알려줘.":
-            previous_name = "- 이전 확정 역량: ['성실성']"
+            previous_result = "- 이전 결과 이름(최대 20개): ['성실성']"
 
-            if previous_name in system_prompt:
-                return interpreter.ParsedNaturalLanguageQuery(
-                    query_type="named_lookup",
-                    competency_names=["성실성"],
-                    requested_fields=["children"],
+            if previous_result in system_prompt:
+                return ParsedRegistryQuery(
+                    intent=QueryIntent.ITEM_LOOKUP,
+                    target_names=["성실성"],
+                    fields=[ItemField.CHILDREN],
                 )
 
-            return interpreter.ParsedNaturalLanguageQuery(
-                query_type="out_of_scope",
-            )
+            return ParsedRegistryQuery(intent=QueryIntent.OUT_OF_SCOPE)
 
         if query == "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?":
-            return interpreter.ParsedNaturalLanguageQuery(
-                query_type="semantic_search",
-                requested_fields=["definition"],
+            return ParsedRegistryQuery(
+                intent=QueryIntent.SEMANTIC_SEARCH,
+                fields=[ItemField.DEFINITION],
                 semantic_query="맡은 일을 꼼꼼하게 수행하는 역량",
             )
 
-        return interpreter.ParsedNaturalLanguageQuery(
-            query_type="out_of_scope",
-        )
+        return ParsedRegistryQuery(intent=QueryIntent.OUT_OF_SCOPE)
 
 
 class SemanticSelectorStub:
@@ -80,47 +81,88 @@ class SemanticSelectorStub:
 
 
 def make_synthetic_registry() -> RegistrySnapshot:
-    """운영 레지스트리와 분리된 웹 API 테스트 스냅샷이다."""
+    """운영 DB와 분리된 parent/child 일관 합성 스냅샷이다."""
 
+    def item(
+        item_id: str,
+        name: str,
+        definition: str,
+        *,
+        parent_id: str | None = None,
+        parent_name: str | None = None,
+        children: list[str] | None = None,
+        children_ids: list[str] | None = None,
+    ) -> dict:
+        return {
+            "id": item_id,
+            "name": name,
+            "aliases": [],
+            "instrument": "synthetic",
+            "instrument_label": "합성 검사",
+            "level": "factor" if parent_id is None else "item",
+            "path": [name] if parent_name is None else [parent_name, name],
+            "parent_name": parent_name,
+            "parent_id": parent_id,
+            "children": children or [],
+            "children_ids": children_ids or [],
+            "definition": definition,
+            "definition_status": "provided",
+            "analysis_included": False,
+            "notes": [],
+            "source_section": "테스트",
+        }
+
+    child_names = ["점검행동", "조절행동", "유지행동"]
+    child_ids = ["checking", "regulating", "maintaining"]
     items = [
-        {
-            "id": "conscientiousness",
-            "name": "성실성",
-            "aliases": [],
-            "definition": "맡은 일을 꼼꼼하고 성실하게 수행하는 특성",
-            "definition_status": "provided",
-            "children": ["점검행동", "조절행동", "유지행동"],
-            "path": ["성실성"],
-        },
-        {
-            "id": "empathy",
-            "name": "공감성",
-            "aliases": [],
-            "definition": "타인의 감정과 입장을 이해하는 특성",
-            "definition_status": "provided",
-            "children": [],
-            "path": ["공감성"],
-        },
+        item(
+            "conscientiousness",
+            "성실성",
+            "맡은 일을 꼼꼼하고 성실하게 수행하는 특성",
+            children=child_names,
+            children_ids=child_ids,
+        ),
+        *[
+            item(
+                child_id,
+                child_name,
+                f"{child_name}의 합성 테스트 정의",
+                parent_id="conscientiousness",
+                parent_name="성실성",
+            )
+            for child_id, child_name in zip(child_ids, child_names, strict=True)
+        ],
+        item(
+            "empathy",
+            "공감성",
+            "타인의 감정과 입장을 이해하는 특성",
+        ),
     ]
-    canonical_lookup = {item["name"]: item for item in items}
-    canonical_names = tuple(sorted(canonical_lookup))
-    name_catalog = "\n".join(f"- {name}" for name in canonical_names)
-    semantic_catalog = "\n".join(
-        f"- 이름: {name}\n  정의: {canonical_lookup[name]['definition']}"
-        for name in canonical_names
-    )
+    source_hash = "b" * 64
+    document = {
+        "schema_version": "1.0",
+        "source": {
+            "file": "synthetic.md",
+            "sha256": source_hash,
+            "encoding": "utf-8",
+        },
+        "rules": {"synthetic": "웹 API 합성 레지스트리"},
+        "validation": {
+            "status": "passed",
+            "counts": {"total": len(items)},
+        },
+        "items": items,
+    }
 
-    return RegistrySnapshot(
-        version_id=1,
-        source_filename="synthetic.md",
-        source_sha256="b" * 64,
-        schema_version="1.0",
-        document={"schema_version": "1.0", "items": items},
-        lookup=dict(canonical_lookup),
-        canonical_lookup=canonical_lookup,
-        canonical_names=canonical_names,
-        name_catalog=name_catalog,
-        semantic_catalog=semantic_catalog,
+    return build_registry_snapshot(
+        {
+            "id": 1,
+            "source_filename": "synthetic.md",
+            "source_sha256": source_hash,
+            "schema_version": "1.0",
+            "registry_json": document,
+            "item_count": len(items),
+        }
     )
 
 
@@ -190,6 +232,29 @@ def create_thread(client: TestClient) -> str:
     return thread_id
 
 
+def parse_sse_events(response_text: str) -> list[tuple[str, dict]]:
+    """테스트 응답의 완결된 SSE frame을 event/data 쌍으로 읽는다."""
+
+    events: list[tuple[str, dict]] = []
+
+    for frame in re.split(r"\r?\n\r?\n", response_text.strip()):
+        event_name = "message"
+        data_lines: list[str] = []
+
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                event_name = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+
+        if data_lines:
+            events.append(
+                (event_name, json.loads("\n".join(data_lines)))
+            )
+
+    return events
+
+
 def test_static_files_and_health(client: TestClient) -> None:
     health_response = client.get("/api/health")
     index_response = client.get("/")
@@ -212,6 +277,14 @@ def test_static_files_and_health(client: TestClient) -> None:
     assert "competency_chat_thread_id" in js_response.text
     assert ".textContent" in js_response.text
     assert "innerHTML" not in js_response.text
+    assert 'fetch("/api/chat/stream"' in js_response.text
+    assert "response.body.getReader()" in js_response.text
+    assert 'new TextDecoder("utf-8")' in js_response.text
+    assert "decoder.decode(value, { stream: true })" in js_response.text
+    assert "AbortController" in js_response.text
+
+    assert ".streaming-bubble::after" in css_response.text
+    assert "prefers-reduced-motion" in css_response.text
 
 
 def test_new_thread_has_empty_history(client: TestClient) -> None:
@@ -275,6 +348,283 @@ def test_invalid_thread_id_is_rejected(client: TestClient) -> None:
     assert history_response.status_code == 422
 
 
+def test_stream_input_validation_reuses_chat_request(
+    client: TestClient,
+) -> None:
+    blank_response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "   ",
+            "thread_id": "00000000-0000-4000-8000-000000000000",
+        },
+    )
+    invalid_id_response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "성실성을 알려줘.",
+            "thread_id": "not-a-uuid",
+        },
+    )
+
+    assert blank_response.status_code == 422
+    assert "질문을 입력해 주세요." in blank_response.text
+    assert invalid_id_response.status_code == 422
+
+
+def test_stream_contract_utf8_headers_and_public_field_filtering(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = create_thread(client)
+    answer = '성실성은 "맡은 일"을\n꼼꼼히 수행하는 특성입니다.'
+
+    async def fake_stream(query: str, actual_thread_id: str):
+        assert query == "성실성의 정의를 알려줘."
+        assert actual_thread_id == thread_id
+
+        # web layer의 start와 중복되므로 공개 응답에서는 한 번만 보여야 한다.
+        yield {
+            "event": "start",
+            "payload": {"thread_id": actual_thread_id},
+        }
+        yield {
+            "type": "status",
+            "data": {
+                "stage": "parse_query",
+                "internal_plan": "stable-secret-id",
+            },
+        }
+        yield ("delta", {"text": '성실성은 "맡은 일"을\n'})
+        yield {"event": "delta", "payload": {"text": "꼼꼼히 수행하는 특성입니다."}}
+        yield {
+            "kind": "done",
+            "answer": answer,
+            "candidates": ["성실성", "성실성", 123],
+            "internal_result": "stable-secret-id",
+        }
+
+    monkeypatch.setattr(
+        interpreter,
+        "run_competency_stream",
+        fake_stream,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "성실성의 정의를 알려줘.",
+            "thread_id": thread_id,
+        },
+    )
+    events = parse_sse_events(response.text)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert [event for event, _ in events] == [
+        "start",
+        "status",
+        "delta",
+        "delta",
+        "done",
+    ]
+    assert events[0][1] == {"thread_id": thread_id}
+    assert events[1][1] == {"stage": "질문을 이해하는 중"}
+    assert "".join(
+        payload["text"]
+        for event, payload in events
+        if event == "delta"
+    ) == answer
+    assert events[-1][1] == {
+        "thread_id": thread_id,
+        "answer": answer,
+        "candidates": ["성실성"],
+    }
+    assert "stable-secret-id" not in response.text
+    # ensure_ascii=False로 한국어를 실제 UTF-8 SSE data에 보낸다.
+    assert "성실성" in response.text
+    assert "\\\"맡은 일\\\"" in response.text
+    assert "\\n" in response.text
+
+
+def test_stream_replace_overwrites_partial_answer(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = create_thread(client)
+    fallback = "검증된 결정적 대체 답변입니다."
+
+    async def fake_stream(_: str, __: str):
+        yield {"event": "delta", "payload": {"text": "잠정 답변"}}
+        yield {"event": "replace", "payload": {"answer": fallback}}
+        yield {
+            "event": "done",
+            "payload": {
+                "thread_id": thread_id,
+                "answer": fallback,
+                "candidates": ["성실성"],
+            },
+        }
+
+    monkeypatch.setattr(
+        interpreter,
+        "run_competency_stream",
+        fake_stream,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "성실성",
+            "thread_id": thread_id,
+        },
+    )
+    events = parse_sse_events(response.text)
+
+    assert [event for event, _ in events] == [
+        "start",
+        "delta",
+        "replace",
+        "done",
+    ]
+    assert events[-2][1] == {"answer": fallback}
+    assert events[-1][1]["answer"] == fallback
+    assert events[-1][1]["candidates"] == ["성실성"]
+
+
+def test_stream_internal_error_is_generic_and_does_not_leak(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    thread_id = create_thread(client)
+    caplog.set_level(logging.ERROR, logger="web_api")
+
+    async def broken_stream(_: str, __: str):
+        yield {"event": "delta", "payload": {"text": "잠정"}}
+        raise RuntimeError(
+            "Traceback: postgresql://admin:password@secret-host/database"
+        )
+
+    monkeypatch.setattr(
+        interpreter,
+        "run_competency_stream",
+        broken_stream,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "성실성",
+            "thread_id": thread_id,
+        },
+    )
+    events = parse_sse_events(response.text)
+
+    assert [event for event, _ in events] == ["start", "delta", "error"]
+    assert events[-1][1] == {
+        "code": "answer_generation_failed",
+        "message": (
+            "답변을 만드는 중 문제가 발생했습니다. "
+            "잠시 후 다시 시도해 주세요."
+        ),
+        "retryable": True,
+    }
+    assert "Traceback" not in response.text
+    assert "password" not in response.text
+    assert "secret-host" not in response.text
+    assert "password" not in caplog.text
+    assert "secret-host" not in caplog.text
+    assert "postgresql://" not in caplog.text
+
+
+def test_disconnected_sse_client_closes_runtime_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    class DisconnectRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    class RuntimeStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return {"type": "delta", "text": "저장되면 안 되는 잠정 답변"}
+
+        async def aclose(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(
+        web_api.competency_runtime,
+        "run_competency_stream",
+        lambda *_: RuntimeStream(),
+    )
+
+    async def collect() -> list[str]:
+        return [
+            frame
+            async for frame in web_api._chat_event_stream(
+                DisconnectRequest(),  # type: ignore[arg-type]
+                "질문",
+                "00000000-0000-4000-8000-000000000001",
+            )
+        ]
+
+    frames = asyncio.run(collect())
+    assert len(frames) == 1
+    assert "event: start" in frames[0]
+    assert "잠정 답변" not in frames[0]
+    assert closed
+
+
+def test_real_stream_done_matches_checkpoint_history_and_non_stream(
+    client: TestClient,
+) -> None:
+    stream_thread_id = create_thread(client)
+    response = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "성실성의 정의를 알려줘.",
+            "thread_id": stream_thread_id,
+        },
+    )
+    events = parse_sse_events(response.text)
+
+    assert response.status_code == 200
+    assert events[0][0] == "start"
+    assert events[-1][0] == "done"
+    assert any(event == "delta" for event, _ in events)
+    done = events[-1][1]
+
+    history = client.get(
+        f"/api/threads/{stream_thread_id}/messages"
+    ).json()
+    assert [message["role"] for message in history["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert history["messages"][-1]["content"] == done["answer"]
+    assert history["candidates"] == done["candidates"]
+
+    non_stream_thread_id = create_thread(client)
+    non_stream = client.post(
+        "/api/chat",
+        json={
+            "message": "성실성의 정의를 알려줘.",
+            "thread_id": non_stream_thread_id,
+        },
+    ).json()
+    assert non_stream["answer"] == done["answer"]
+
+
 def test_natural_language_query_and_conversation_restore(
     client: TestClient,
 ) -> None:
@@ -291,8 +641,9 @@ def test_natural_language_query_and_conversation_restore(
     assert chat_response.status_code == 200
     chat_data = chat_response.json()
     assert chat_data["thread_id"] == thread_id
-    assert "역량명: 성실성" in chat_data["answer"]
-    assert "정의:" in chat_data["answer"]
+    assert "성실성" in chat_data["answer"]
+    assert "맡은 일을 꼼꼼하고 성실하게 수행하는 특성" in chat_data["answer"]
+    assert "역량명:" not in chat_data["answer"]
     assert chat_data["candidates"] == []
 
     history_response = client.get(
@@ -308,7 +659,7 @@ def test_natural_language_query_and_conversation_restore(
     assert history_data["messages"][0]["content"] == (
         "성실성의 정의를 알려줘."
     )
-    assert "역량명: 성실성" in history_data["messages"][1]["content"]
+    assert "성실성" in history_data["messages"][1]["content"]
 
 
 def test_same_thread_follow_up_uses_previous_competency(
@@ -334,8 +685,8 @@ def test_same_thread_follow_up_uses_previous_competency(
     assert first_response.status_code == 200
     assert second_response.status_code == 200
     answer = second_response.json()["answer"]
-    assert "역량명: 성실성" in answer
-    assert "하위요인: 점검행동, 조절행동, 유지행동" in answer
+    assert "성실성" in answer
+    assert all(name in answer for name in ["점검행동", "조절행동", "유지행동"])
 
 
 def test_different_threads_do_not_share_context(
@@ -397,9 +748,9 @@ def test_candidate_state_and_candidate_selection(
 
     assert selection_response.status_code == 200
     selection_data = selection_response.json()
-    assert "역량명: 성실성" in selection_data["answer"]
-    assert "정의:" in selection_data["answer"]
-    assert "하위요인:" not in selection_data["answer"]
+    assert "성실성" in selection_data["answer"]
+    assert "맡은 일을 꼼꼼하고 성실하게 수행하는 특성" in selection_data["answer"]
+    assert "역량명:" not in selection_data["answer"]
     assert selection_data["candidates"] == []
 
 
@@ -425,7 +776,8 @@ def test_checkpoint_survives_runtime_reinitialization(
     )
 
     assert history_response.status_code == 200
-    assert "역량명: 공감성" in history_response.text
+    assert "공감성" in history_response.text
+    assert "타인의 감정과 입장을 이해하는 특성" in history_response.text
 
 
 def test_existing_ask_competency_api_remains_compatible(
@@ -438,7 +790,8 @@ def test_existing_ask_competency_api_remains_compatible(
         thread_id=thread_id,
     )
 
-    assert "역량명: 성실성" in answer
+    assert "성실성" in answer
+    assert "맡은 일을 꼼꼼하고 성실하게 수행하는 특성" in answer
 
 
 def test_public_assets_do_not_contain_server_secrets(

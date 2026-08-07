@@ -8,7 +8,7 @@ and keeps the returned snapshot in memory.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -84,13 +84,18 @@ class RegistrySnapshot:
     canonical_names: tuple[str, ...]
     name_catalog: str
     semantic_catalog: str
+    id_lookup: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Recursively freeze every registry view while preserving aliases."""
 
-        # A single memo is shared across all three views.  Consequently an
-        # item referenced by document, canonical_lookup, and an alias remains
-        # the exact same frozen object rather than three independent copies.
+        # A single memo is shared across every view.  Consequently an item
+        # referenced by document, id_lookup, canonical_lookup, and an alias
+        # remains the exact same frozen object rather than independent copies.
+        id_lookup = self.id_lookup or {
+            item["id"]: item
+            for item in self.document.get("items", ())
+        }
         memo: dict[int, object] = {}
         object.__setattr__(
             self,
@@ -101,6 +106,11 @@ class RegistrySnapshot:
             self,
             "lookup",
             _deep_freeze(self.lookup, memo),
+        )
+        object.__setattr__(
+            self,
+            "id_lookup",
+            _deep_freeze(id_lookup, memo),
         )
         object.__setattr__(
             self,
@@ -427,6 +437,7 @@ def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
             "DB item_count와 registry_json의 실제 항목 수가 일치하지 않습니다."
         )
 
+    id_lookup = {item["id"]: item for item in items}
     canonical_lookup = {item["name"]: item for item in items}
     lookup = dict(canonical_lookup)
     for item in items:
@@ -445,6 +456,7 @@ def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
         canonical_names=canonical_names,
         name_catalog=_build_name_catalog(canonical_names, canonical_lookup),
         semantic_catalog=_build_semantic_catalog(canonical_names, canonical_lookup),
+        id_lookup=id_lookup,
     )
 
 

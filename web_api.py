@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 import logging
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import competency_interpreter as competency_runtime
 from competency_interpreter import (
     close_competency_runtime,
     get_competency_state,
@@ -27,6 +32,28 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_PATH = STATIC_DIR / "index.html"
 MAX_MESSAGE_LENGTH = 2_000
+
+_SSE_EVENT_NAMES = {
+    "start",
+    "status",
+    "delta",
+    "replace",
+    "done",
+    "error",
+}
+_SAFE_STATUS_STAGES = {
+    "질문을 이해하는 중",
+    "레지스트리를 조회하는 중",
+    "답변을 작성하는 중",
+}
+_GENERIC_STREAM_ERROR = {
+    "code": "answer_generation_failed",
+    "message": (
+        "답변을 만드는 중 문제가 발생했습니다. "
+        "잠시 후 다시 시도해 주세요."
+    ),
+    "retryable": True,
+}
 
 
 class ChatRequest(BaseModel):
@@ -185,6 +212,231 @@ def _last_assistant_answer(state: dict) -> str:
     raise RuntimeError("LangGraph 응답에서 챗봇 메시지를 찾지 못했습니다.")
 
 
+def _sse_frame(event: str, payload: Mapping[str, Any]) -> str:
+    """UTF-8 JSON 한 건을 브라우저가 읽는 SSE frame으로 직렬화한다."""
+
+    data = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _event_parts(raw_event: object) -> tuple[str, dict[str, Any]]:
+    """runtime event의 사소한 표현 차이를 공개 event 형식으로 모은다."""
+
+    if isinstance(raw_event, tuple) and len(raw_event) == 2:
+        event, payload = raw_event
+    elif isinstance(raw_event, Mapping):
+        event = (
+            raw_event.get("event")
+            or raw_event.get("type")
+            or raw_event.get("kind")
+        )
+        payload = raw_event.get("data", raw_event.get("payload"))
+
+        if payload is None:
+            payload = {
+                key: value
+                for key, value in raw_event.items()
+                if key not in {"event", "type", "kind"}
+            }
+    else:
+        event = getattr(raw_event, "event", None)
+        payload = getattr(
+            raw_event,
+            "data",
+            getattr(raw_event, "payload", None),
+        )
+
+    if not isinstance(event, str):
+        return "", {}
+
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump(mode="json")
+
+    if not isinstance(payload, Mapping):
+        scalar_fields = {
+            "status": "stage",
+            "delta": "text",
+            "replace": "answer",
+        }
+        scalar_field = scalar_fields.get(event.strip().lower())
+
+        if scalar_field and isinstance(payload, str):
+            return event.strip().lower(), {scalar_field: payload}
+
+        return event.strip().lower(), {}
+
+    return event.strip().lower(), dict(payload)
+
+
+def _safe_status_stage(value: object) -> str | None:
+    """내부 node 이름 대신 세 가지 사용자용 진행 상태만 허용한다."""
+
+    if not isinstance(value, str):
+        return None
+
+    stage = value.strip()
+
+    if stage in _SAFE_STATUS_STAGES:
+        return stage
+
+    lowered = stage.casefold()
+
+    if any(token in lowered for token in ("질문", "parse", "understand")):
+        return "질문을 이해하는 중"
+
+    if any(
+        token in lowered
+        for token in ("레지스트리", "registry", "execute", "lookup")
+    ):
+        return "레지스트리를 조회하는 중"
+
+    if any(token in lowered for token in ("답변", "answer", "write")):
+        return "답변을 작성하는 중"
+
+    return None
+
+
+def _candidate_values(value: object) -> list[str]:
+    """SSE done event의 후보도 기존 API와 같은 공개 규칙으로 제한한다."""
+
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    candidates: list[str] = []
+
+    for candidate in value:
+        if not isinstance(candidate, str):
+            continue
+
+        name = candidate.strip()
+
+        if name and name not in candidates:
+            candidates.append(name)
+
+    return candidates
+
+
+def _public_stream_event(
+    raw_event: object,
+    thread_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """runtime 출력에서 공개 계약에 속한 필드만 골라낸다."""
+
+    event, payload = _event_parts(raw_event)
+
+    if event not in _SSE_EVENT_NAMES:
+        return None
+
+    if event == "start":
+        return event, {"thread_id": thread_id}
+
+    if event == "status":
+        stage = _safe_status_stage(payload.get("stage"))
+        return (event, {"stage": stage}) if stage else None
+
+    if event == "delta":
+        text = payload.get("text")
+        return (event, {"text": text}) if isinstance(text, str) and text else None
+
+    if event == "replace":
+        answer = payload.get("answer")
+        return (
+            (event, {"answer": answer})
+            if isinstance(answer, str) and answer
+            else None
+        )
+
+    if event == "done":
+        answer = payload.get("answer")
+
+        if not isinstance(answer, str) or not answer:
+            return None
+
+        return event, {
+            "thread_id": thread_id,
+            "answer": answer,
+            "candidates": _candidate_values(
+                payload.get("candidates", payload.get("candidate_names"))
+            ),
+        }
+
+    # Runtime의 예외 메시지나 내부 error code는 브라우저로 전달하지 않는다.
+    return "error", dict(_GENERIC_STREAM_ERROR)
+
+
+async def _chat_event_stream(
+    request: Request,
+    message: str,
+    thread_id: str,
+) -> AsyncIterator[str]:
+    """LangGraph stream을 취소 가능한 공개 SSE stream으로 변환한다."""
+
+    runtime_stream: object | None = None
+    terminal_event_sent = False
+
+    yield _sse_frame("start", {"thread_id": thread_id})
+
+    try:
+        runtime_stream = competency_runtime.run_competency_stream(
+            message,
+            thread_id,
+        )
+
+        if inspect.isawaitable(runtime_stream):
+            runtime_stream = await runtime_stream
+
+        if not hasattr(runtime_stream, "__aiter__"):
+            raise TypeError("run_competency_stream must return an async iterator")
+
+        async for raw_event in runtime_stream:
+            if await request.is_disconnected():
+                return
+
+            public_event = _public_stream_event(raw_event, thread_id)
+
+            if public_event is None:
+                continue
+
+            event, payload = public_event
+
+            # start는 web layer가 정확히 한 번 먼저 보낸다.
+            if event == "start":
+                continue
+
+            yield _sse_frame(event, payload)
+
+            if event in {"done", "error"}:
+                terminal_event_sent = True
+                return
+
+        if not terminal_event_sent and not await request.is_disconnected():
+            yield _sse_frame("error", _GENERIC_STREAM_ERROR)
+    except asyncio.CancelledError:
+        # StreamingResponse가 연결 종료를 알리면 model stream까지 취소한다.
+        raise
+    except Exception:
+        # The original exception can contain a DB URL, prompt, or source text.
+        # Public and server-log surfaces both keep only the safe operation label.
+        LOGGER.error("역량 스트림 생성 실패: thread_id=%s", thread_id)
+
+        if not terminal_event_sent and not await request.is_disconnected():
+            yield _sse_frame("error", _GENERIC_STREAM_ERROR)
+    finally:
+        close_stream = getattr(runtime_stream, "aclose", None)
+
+        if callable(close_stream):
+            try:
+                await close_stream()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.error("역량 스트림 종료 실패: thread_id=%s", thread_id)
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(INDEX_PATH)
@@ -213,10 +465,7 @@ def get_thread_messages(
     try:
         state = get_competency_state(thread_id_text)
     except Exception as error:
-        LOGGER.exception(
-            "대화 상태 조회 실패: thread_id=%s",
-            thread_id_text,
-        )
+        LOGGER.error("대화 상태 조회 실패: thread_id=%s", thread_id_text)
         raise HTTPException(
             status_code=500,
             detail="대화 기록을 불러오지 못했습니다.",
@@ -240,10 +489,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         )
         answer = _last_assistant_answer(state)
     except Exception as error:
-        LOGGER.exception(
-            "역량 답변 생성 실패: thread_id=%s",
-            thread_id,
-        )
+        LOGGER.error("역량 답변 생성 실패: thread_id=%s", thread_id)
         raise HTTPException(
             status_code=500,
             detail=(
@@ -256,4 +502,27 @@ def chat(request: ChatRequest) -> ChatResponse:
         thread_id=thread_id,
         answer=answer,
         candidates=_public_candidates(state),
+    )
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    http_request: Request,
+) -> StreamingResponse:
+    """기존 ChatRequest를 받아 검증된 공개 event만 SSE로 전달한다."""
+
+    thread_id = str(request.thread_id)
+
+    return StreamingResponse(
+        _chat_event_stream(
+            http_request,
+            request.message,
+            thread_id,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
