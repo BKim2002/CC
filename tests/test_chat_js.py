@@ -59,17 +59,18 @@ globalThis.document = {
   createElement() { return stubElement(); },
 };
 globalThis.window = { addEventListener() {} };
+const storage = new Map();
 globalThis.localStorage = {
-  getItem() { return null; },
-  setItem() {},
-  removeItem() {},
+  getItem(key) { return storage.get(key) ?? null; },
+  setItem(key, value) { storage.set(key, String(value)); },
+  removeItem(key) { storage.delete(key); },
 };
 
 const source = fs.readFileSync(process.argv[1], "utf8")
   + `\n;globalThis.__chatTest = {
       parseSseFrame, readSseEvents, setBubbleText, streamQuestion,
       renderCandidates, setLoading, sendQuestion, startNewConversation,
-      elements,
+      restoreConversation, initialize, elements,
       setThreadId(value) { threadId = value; },
       setActiveRequest(value) { activeRequest = value; },
       state() { return { threadId, isLoading, activeRequest }; },
@@ -177,6 +178,22 @@ async function main() {
   assert.strictEqual(__chatTest.elements.candidateList.children.length, 1);
   assert.strictEqual(__chatTest.elements.candidateList.children[0].textContent, "성실성");
 
+  const failedStreamPayload = [
+    'event: delta\ndata: {"text":"저장되면 안 되는 잠정 답변"}\n\n',
+    'event: error\ndata: {"message":"답변을 만드는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."}\n\n',
+  ].join("");
+  globalThis.fetch = async () => streamingResponse(failedStreamPayload);
+  const failedBubble = stubElement();
+  await assert.rejects(
+    __chatTest.streamQuestion(
+      "실패하는 질문",
+      new AbortController(),
+      failedBubble,
+    ),
+    /답변을 만드는 중 문제가 발생했습니다/u,
+  );
+  assert.strictEqual(failedBubble.textContent, "");
+
   let duplicateFetches = 0;
   globalThis.fetch = async () => {
     duplicateFetches += 1;
@@ -188,6 +205,54 @@ async function main() {
   assert.strictEqual(__chatTest.elements.messageInput.disabled, true);
   assert.strictEqual(__chatTest.elements.messageList.getAttribute("aria-busy"), "true");
   __chatTest.setLoading(false);
+
+  const restoredThread = "00000000-0000-4000-8000-000000000002";
+  localStorage.setItem("competency_chat_thread_id", restoredThread);
+  __chatTest.setThreadId(null);
+  globalThis.fetch = async (url) => {
+    assert.strictEqual(
+      url,
+      `/api/threads/${restoredThread}/messages`,
+    );
+    return {
+      ok: true,
+      async json() {
+        return {
+          messages: [
+            { role: "user", content: "이전 질문" },
+            { role: "assistant", content: "체크포인트의 이전 답변" },
+          ],
+          candidates: ["성실성"],
+        };
+      },
+    };
+  };
+  await __chatTest.initialize();
+  assert.strictEqual(__chatTest.state().threadId, restoredThread);
+  assert.strictEqual(__chatTest.elements.messageList.children.length, 2);
+  assert.strictEqual(
+    __chatTest.elements.messageList.children[1].children[0].children[1].textContent,
+    "체크포인트의 이전 답변",
+  );
+
+  const newThread = "00000000-0000-4000-8000-000000000003";
+  let successAbort = false;
+  __chatTest.setActiveRequest({ abort() { successAbort = true; } });
+  globalThis.fetch = async (url, options) => {
+    assert.strictEqual(url, "/api/threads");
+    assert.strictEqual(options.method, "POST");
+    return {
+      ok: true,
+      async json() { return { thread_id: newThread }; },
+    };
+  };
+  await __chatTest.startNewConversation();
+  assert.strictEqual(successAbort, true);
+  assert.strictEqual(__chatTest.state().threadId, newThread);
+  assert.strictEqual(
+    localStorage.getItem("competency_chat_thread_id"),
+    newThread,
+  );
 
   let aborted = false;
   __chatTest.setThreadId(validThread);

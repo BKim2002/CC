@@ -13,71 +13,143 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 import competency_interpreter as interpreter
 import web_api
-from competency_query import ItemField, ParsedRegistryQuery, QueryIntent
+from competency_query import ItemField, QueryIntent
 from competency_registry import RegistrySnapshot, build_registry_snapshot
+from llm_gateway import FIXED_FAILURE_MESSAGE
 from web_api import app
 
 
-class QueryParserStub:
-    """웹 API 테스트에서 자연어를 결정적으로 구조화한다."""
+class GatewayStub:
+    """모든 웹 입력을 새 strict Gateway 계약으로 구조화한다."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
 
     def invoke(
         self,
         messages: list[tuple[str, str]],
-    ) -> ParsedRegistryQuery:
+    ) -> dict:
+        self.calls.append("gateway")
         system_prompt = messages[0][1]
         query = messages[-1][1]
 
-        if query == "성실성의 정의를 알려줘.":
-            return ParsedRegistryQuery(
-                intent=QueryIntent.ITEM_LOOKUP,
-                target_names=["성실성"],
-                fields=[ItemField.DEFINITION],
-            )
-
-        if query == "공감성의 정의를 알려줘.":
-            return ParsedRegistryQuery(
-                intent=QueryIntent.ITEM_LOOKUP,
-                target_names=["공감성"],
-                fields=[ItemField.DEFINITION],
+        if query in {
+            "성실성",
+            "성실성의 정의를 알려줘.",
+            "공감성의 정의를 알려줘.",
+        }:
+            name = "공감성" if "공감성" in query else "성실성"
+            return self._registry_decision(
+                {
+                    "intent": QueryIntent.ITEM_LOOKUP.value,
+                    "target_names": [name],
+                    "fields": [ItemField.DEFINITION.value],
+                }
             )
 
         if query == "그 역량의 하위요인도 알려줘.":
-            previous_result = "- 이전 결과 이름(최대 20개): ['성실성']"
-
-            if previous_result in system_prompt:
-                return ParsedRegistryQuery(
-                    intent=QueryIntent.ITEM_LOOKUP,
-                    target_names=["성실성"],
-                    fields=[ItemField.CHILDREN],
+            if '"previous_results": [{"id": "conscientiousness"' in system_prompt:
+                return self._registry_decision(
+                    {
+                        "intent": QueryIntent.ITEM_LOOKUP.value,
+                        "target_names": ["성실성"],
+                        "fields": [ItemField.CHILDREN.value],
+                    }
                 )
 
-            return ParsedRegistryQuery(intent=QueryIntent.OUT_OF_SCOPE)
+            return {
+                "route": "needs_clarification",
+                "clarification_type": "registry",
+            }
 
         if query == "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?":
-            return ParsedRegistryQuery(
-                intent=QueryIntent.SEMANTIC_SEARCH,
-                fields=[ItemField.DEFINITION],
-                semantic_query="맡은 일을 꼼꼼하게 수행하는 역량",
+            return self._registry_decision(
+                {
+                    "intent": QueryIntent.SEMANTIC_SEARCH.value,
+                    "fields": [ItemField.DEFINITION.value],
+                    "semantic_query": "맡은 일을 꼼꼼하게 수행하는 역량",
+                }
             )
 
-        return ParsedRegistryQuery(intent=QueryIntent.OUT_OF_SCOPE)
+        if query == "안녕하세요":
+            return {
+                "route": "general_conversation",
+                "conversation_type": "greeting",
+            }
+
+        return {
+            "route": "needs_clarification",
+            "clarification_type": "general",
+        }
+
+    @staticmethod
+    def _registry_decision(query: dict) -> dict:
+        return {
+            "route": "registry_query",
+            "query": query,
+            "answer_mode": "registry_facts",
+            "acknowledge_greeting": False,
+            "unsupported_remainder": None,
+        }
 
 
 class SemanticSelectorStub:
     """의미 검색 결과를 실제 OpenAI 호출 없이 고정한다."""
 
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
     def invoke(
         self,
         _: list[tuple[str, str]],
     ) -> interpreter.SemanticSelection:
+        self.calls.append("semantic_selector")
         return interpreter.SemanticSelection(
-            candidate_names=["성실성"]
+            candidate_names=["성실성"],
+            confidence="medium",
+            auto_select=False,
         )
+
+
+class RegistryWriterStub:
+    """prompt의 검증 기준 답변을 그대로 stream하는 grounded writer다."""
+
+    _REFERENCE_MARKER = (
+        "검증 기준 답변(사용자에게 그대로 복사하는 Python fallback이 아니라 사실 기준):\n"
+    )
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def astream(self, messages: list[tuple[str, str]]):
+        self.calls.append("registry_writer")
+        human_prompt = messages[-1][1]
+        assert self._REFERENCE_MARKER in human_prompt
+        answer = human_prompt.split(self._REFERENCE_MARKER, 1)[1].strip()
+        midpoint = max(1, len(answer) // 2)
+        yield AIMessageChunk(content=answer[:midpoint])
+        yield AIMessageChunk(content=answer[midpoint:])
+
+
+class GeneralWriterStub:
+    """일반 route를 실제 streaming writer 형태로 응답한다."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def astream(self, messages: list[tuple[str, str]]):
+        self.calls.append("general_writer")
+        human_prompt = messages[-1][1]
+        if "응답 목적: 짧은 인사" in human_prompt:
+            answer = "안녕하세요! 궁금한 역량의 정의나 하위요인을 물어보세요."
+        else:
+            answer = "질문을 조금 더 구체적으로 알려 주세요. 역량에 관해 궁금한 점도 물어보실 수 있어요."
+        yield AIMessageChunk(content=answer)
 
 
 def make_synthetic_registry() -> RegistrySnapshot:
@@ -177,6 +249,7 @@ def client(
 
     test_database_path = tmp_path / "test_checkpoints.sqlite"
     registry_snapshot = make_synthetic_registry()
+    model_calls: list[str] = []
 
     def open_test_checkpointer(
         runtime_stack: ExitStack,
@@ -205,18 +278,29 @@ def client(
     )
     monkeypatch.setattr(
         interpreter,
-        "_query_parser_for",
-        lambda _: QueryParserStub(),
+        "_gateway_for",
+        lambda _: GatewayStub(model_calls),
     )
     monkeypatch.setattr(
         interpreter,
         "_semantic_selector_for",
-        lambda _: SemanticSelectorStub(),
+        lambda _: SemanticSelectorStub(model_calls),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_registry_writer_for",
+        lambda _: RegistryWriterStub(model_calls),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_general_writer_for",
+        lambda _: GeneralWriterStub(model_calls),
     )
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")
 
     with TestClient(app) as test_client:
+        test_client.model_calls = model_calls  # type: ignore[attr-defined]
         yield test_client
 
     interpreter.close_competency_runtime()
@@ -300,6 +384,30 @@ def test_new_thread_has_empty_history(client: TestClient) -> None:
         "messages": [],
         "candidates": [],
     }
+
+
+def test_history_hides_stale_candidates_when_latest_turn_has_no_assistant(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = create_thread(client)
+    monkeypatch.setattr(
+        web_api,
+        "get_competency_state",
+        lambda _: {
+            "messages": [
+                HumanMessage(content="행동과 가까운 역량은?"),
+                AIMessage(content="성실성을 후보로 찾았습니다."),
+                HumanMessage(content="취소된 다음 질문"),
+            ],
+            "candidate_names": ["성실성"],
+        },
+    )
+
+    response = client.get(f"/api/threads/{thread_id}/messages")
+
+    assert response.status_code == 200
+    assert response.json()["candidates"] == []
 
 
 @pytest.mark.parametrize(
@@ -399,7 +507,7 @@ def test_stream_contract_utf8_headers_and_public_field_filtering(
         yield {
             "kind": "done",
             "answer": answer,
-            "candidates": ["성실성", "성실성", 123],
+            "candidates": ["성실성", "미등록 후보", "성실성", 123],
             "internal_result": "stable-secret-id",
         }
 
@@ -447,6 +555,50 @@ def test_stream_contract_utf8_headers_and_public_field_filtering(
     assert "성실성" in response.text
     assert "\\\"맡은 일\\\"" in response.text
     assert "\\n" in response.text
+
+
+def test_public_candidates_are_active_canonical_names_limited_to_three(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_id = create_thread(client)
+
+    async def fake_stream(_: str, __: str):
+        yield {
+            "event": "done",
+            "payload": {
+                "answer": "검증된 후보입니다.",
+                "candidates": [
+                    "성실성",
+                    "공감성",
+                    "점검행동",
+                    "조절행동",
+                    "등록되지 않은 이름",
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        interpreter,
+        "run_competency_stream",
+        fake_stream,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"message": "후보를 찾아줘", "thread_id": thread_id},
+    )
+    events = parse_sse_events(response.text)
+
+    assert events[-1] == (
+        "done",
+        {
+            "thread_id": thread_id,
+            "answer": "검증된 후보입니다.",
+            "candidates": ["성실성", "공감성", "점검행동"],
+        },
+    )
 
 
 def test_stream_replace_overwrites_partial_answer(
@@ -528,10 +680,7 @@ def test_stream_internal_error_is_generic_and_does_not_leak(
     assert [event for event, _ in events] == ["start", "delta", "error"]
     assert events[-1][1] == {
         "code": "answer_generation_failed",
-        "message": (
-            "답변을 만드는 중 문제가 발생했습니다. "
-            "잠시 후 다시 시도해 주세요."
-        ),
+        "message": FIXED_FAILURE_MESSAGE,
         "retryable": True,
     }
     assert "Traceback" not in response.text
@@ -603,6 +752,13 @@ def test_real_stream_done_matches_checkpoint_history_and_non_stream(
     assert events[-1][0] == "done"
     assert any(event == "delta" for event, _ in events)
     done = events[-1][1]
+    registry_deltas = [
+        payload["text"]
+        for event, payload in events
+        if event == "delta"
+    ]
+    # Registry Writer stub은 두 chunk를 생성하지만 검증 전에는 공개되지 않는다.
+    assert registry_deltas == [done["answer"]]
 
     history = client.get(
         f"/api/threads/{stream_thread_id}/messages"
@@ -623,6 +779,82 @@ def test_real_stream_done_matches_checkpoint_history_and_non_stream(
         },
     ).json()
     assert non_stream["answer"] == done["answer"]
+
+
+def test_direct_registry_request_is_gateway_first_and_uses_two_model_calls(
+    client: TestClient,
+) -> None:
+    thread_id = create_thread(client)
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "성실성의 정의를 알려줘.",
+            "thread_id": thread_id,
+        },
+    )
+    state = interpreter.get_competency_state(thread_id)
+
+    assert response.status_code == 200
+    assert client.model_calls == [  # type: ignore[attr-defined]
+        "gateway",
+        "registry_writer",
+    ]
+    assert state["llm_call_count"] == 2
+    assert state["messages"][-1].content == response.json()["answer"]
+
+
+def test_semantic_request_uses_gateway_selector_and_writer_within_three_calls(
+    client: TestClient,
+) -> None:
+    thread_id = create_thread(client)
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?",
+            "thread_id": thread_id,
+        },
+    )
+    state = interpreter.get_competency_state(thread_id)
+
+    assert response.status_code == 200
+    assert response.json()["candidates"] == ["성실성"]
+    assert client.model_calls == [  # type: ignore[attr-defined]
+        "gateway",
+        "semantic_selector",
+        "registry_writer",
+    ]
+    assert state["llm_call_count"] == 3
+
+
+def test_general_request_is_gateway_first_and_uses_general_writer(
+    client: TestClient,
+) -> None:
+    thread_id = create_thread(client)
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"message": "안녕하세요", "thread_id": thread_id},
+    )
+    events = parse_sse_events(response.text)
+    done = events[-1][1]
+    state = interpreter.get_competency_state(thread_id)
+
+    assert response.status_code == 200
+    assert events[-1][0] == "done"
+    assert "".join(
+        payload["text"]
+        for event, payload in events
+        if event == "delta"
+    ) == done["answer"]
+    assert done["answer"].startswith("안녕하세요")
+    assert client.model_calls == [  # type: ignore[attr-defined]
+        "gateway",
+        "general_writer",
+    ]
+    assert state["llm_call_count"] == 2
+    assert state["messages"][-1].content == done["answer"]
 
 
 def test_natural_language_query_and_conversation_restore(
@@ -840,12 +1072,7 @@ def test_internal_error_response_does_not_leak_details(
     )
 
     assert response.status_code == 500
-    assert response.json() == {
-        "detail": (
-            "답변을 만드는 중 문제가 발생했습니다. "
-            "잠시 후 다시 시도해 주세요."
-        )
-    }
+    assert response.json() == {"detail": FIXED_FAILURE_MESSAGE}
     assert "Traceback" not in response.text
     assert "password" not in response.text
     assert "secret-host" not in response.text

@@ -25,6 +25,7 @@ from competency_interpreter import (
     initialize_competency_runtime,
     run_competency,
 )
+from llm_gateway import FIXED_FAILURE_MESSAGE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,10 +49,7 @@ _SAFE_STATUS_STAGES = {
 }
 _GENERIC_STREAM_ERROR = {
     "code": "answer_generation_failed",
-    "message": (
-        "답변을 만드는 중 문제가 발생했습니다. "
-        "잠시 후 다시 시도해 주세요."
-    ),
+    "message": FIXED_FAILURE_MESSAGE,
     "retryable": True,
 }
 
@@ -183,20 +181,20 @@ def _public_messages(state: dict) -> list[ConversationMessage]:
 
 
 def _public_candidates(state: dict) -> list[str]:
-    """후보 이름만 중복 없이 공개한다."""
+    """활성 레지스트리에서 재검증한 정식 후보명만 공개한다."""
 
-    candidates: list[str] = []
+    latest_message = next(
+        (
+            message
+            for message in reversed(list(state.get("messages", [])))
+            if isinstance(message, (HumanMessage, AIMessage))
+        ),
+        None,
+    )
+    if not isinstance(latest_message, AIMessage):
+        return []
 
-    for candidate in state.get("candidate_names", []):
-        if not isinstance(candidate, str):
-            continue
-
-        name = candidate.strip()
-
-        if name and name not in candidates:
-            candidates.append(name)
-
-    return candidates
+    return _candidate_values(state.get("candidate_names"))
 
 
 def _last_assistant_answer(state: dict) -> str:
@@ -301,7 +299,7 @@ def _safe_status_stage(value: object) -> str | None:
 
 
 def _candidate_values(value: object) -> list[str]:
-    """SSE done event의 후보도 기존 API와 같은 공개 규칙으로 제한한다."""
+    """후보를 활성 레지스트리의 정식 이름 최대 세 개로 제한한다."""
 
     if not isinstance(value, (list, tuple)):
         return []
@@ -317,7 +315,12 @@ def _candidate_values(value: object) -> list[str]:
         if name and name not in candidates:
             candidates.append(name)
 
-    return candidates
+    try:
+        return competency_runtime.validate_registry_names(candidates)[:3]
+    except Exception:
+        # 후보는 부가 정보다. runtime 상태가 없거나 손상된 후보가 전달되어도
+        # 내부 레지스트리 오류를 공개하지 않고 빈 목록으로 축소한다.
+        return []
 
 
 def _public_stream_event(
@@ -492,10 +495,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         LOGGER.error("역량 답변 생성 실패: thread_id=%s", thread_id)
         raise HTTPException(
             status_code=500,
-            detail=(
-                "답변을 만드는 중 문제가 발생했습니다. "
-                "잠시 후 다시 시도해 주세요."
-            ),
+            detail=FIXED_FAILURE_MESSAGE,
         ) from error
 
     return ChatResponse(
