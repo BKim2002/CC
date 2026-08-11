@@ -696,7 +696,7 @@ def _meta_response_shape_is_safe(text: str) -> bool:
     return (
         len(_sentences(text)) == 1
         and _controlled_scope_vocabulary(text)
-        and _definition_claim_is_absent(text)
+        and definition_claim_is_absent(text)
     )
 
 
@@ -930,7 +930,7 @@ def _all_direct_answers_are_absent(*, acknowledgement: str, full_text: str) -> b
     )
 
 
-def _definition_claim_is_absent(text: str) -> bool:
+def definition_claim_is_absent(text: str) -> bool:
     """Reject registry-like or general-definition claims in scope prose."""
 
     patterns = (
@@ -1159,7 +1159,7 @@ def validate_scope_draft(
             or not is_registry_redirect(redirect)
             or not _redirect_shape_is_safe(redirect)
             or not manifest_claims_are_safe(f"{boundary} {redirect}")
-            or not _definition_claim_is_absent(answer)
+            or not definition_claim_is_absent(answer)
             or not _all_direct_answers_are_absent(
                 acknowledgement=acknowledgement,
                 full_text=answer,
@@ -1195,7 +1195,7 @@ def validate_scope_draft(
         or not is_registry_redirect(redirect)
         or not _redirect_shape_is_safe(redirect)
         or not manifest_claims_are_safe(answer)
-        or not _definition_claim_is_absent(answer)
+        or not definition_claim_is_absent(answer)
     ):
         return None
     if mode in {"bot_identity", "capability_help"} and not _has_registry_reference(response):
@@ -1211,7 +1211,7 @@ def validate_registry_scope_note(text: str, *, category: str, summary: str) -> b
         return False
     if contains_internal_information(candidate) or not scope_boundary_is_valid(candidate):
         return False
-    if not _definition_claim_is_absent(candidate):
+    if not definition_claim_is_absent(candidate):
         return False
     safe_summary = sanitize_topic_summary(
         summary,

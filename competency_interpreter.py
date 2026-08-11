@@ -70,6 +70,7 @@ from llm_gateway import (
 )
 from scope_response import (
     SCOPE_CATEGORIES,
+    definition_claim_is_absent,
     prefers_english,
     sanitize_topic_summary,
     scope_fallback_draft,
@@ -175,7 +176,15 @@ class CompetencyState(MessagesState):
     scope_writer_attempts: NotRequired[int]
     scope_writer_failed: NotRequired[bool]
     next_route: NotRequired[str]
-    response_mode: NotRequired[Literal["llm", "scope_fallback", "failure"]]
+    response_mode: NotRequired[
+        Literal[
+            "llm",
+            "guidance_partial",
+            "registry_fallback",
+            "scope_fallback",
+            "failure",
+        ]
+    ]
     last_scope_answer: NotRequired[str]
 
     # 후속 질문은 정식 이름이 아니라 현재 snapshot에서 재검증할 stable ID를 쓴다.
@@ -1056,6 +1065,8 @@ def _mixed_scope_topic(state: CompetencyState) -> ScopeTopic | None:
 def _registry_writer_input(
     state: CompetencyState,
     context: GroundedAnswerContext,
+    *,
+    retry_issue: str = "",
 ) -> list[tuple[str, str]]:
     mode = state.get("registry_answer_mode", "result")
     mode_label = {
@@ -1107,6 +1118,7 @@ def _registry_writer_input(
 응답 모드: {mode_label}
 인사를 짧게 반영: {bool(state.get('acknowledge_greeting'))}
 미지원 혼합 부분: {unsupported_label}
+재생성 사유 코드: {retry_issue or 'none'}
 사용자 질문: {state.get('raw_query', '')}
 최근 대화(최대 12개): {_writer_recent_context(state)}
 검증된 query plan 요약(stable ID 제외): {json.dumps(_safe_writer_plan_summary(state), ensure_ascii=False)}
@@ -1118,12 +1130,15 @@ Grounding context: {_writer_context_json(context)}
     return [("system", system_prompt), ("human", human_prompt)]
 
 
+SCOPE_SECTION_MARKER = "[지원 범위]"
+
+
 def _split_guidance_answer(
     answer: str,
 ) -> tuple[str, str, str, str] | None:
     facts_marker = "[등록 정보]"
     guidance_marker = "[일반 활용 제안]"
-    scope_marker = "[지원 범위]"
+    scope_marker = SCOPE_SECTION_MARKER
     if (
         answer.count(facts_marker) != 1
         or answer.count(guidance_marker) != 1
@@ -1154,6 +1169,117 @@ def _split_guidance_answer(
 
 
 
+# Personalized judgement, professional advice and unfounded effect claims are
+# out of scope everywhere a writer produces free prose, so the guidance section
+# and the main registry body share one list.
+_PERSONALIZATION_RISK_TOKENS = (
+    "당신",
+    "사용자",
+    "현재 수준",
+    "현재 상태",
+    "점수",
+    "등급",
+    "진단",
+    "채용",
+    "합격",
+    "적합",
+    "취업",
+    "가능성",
+    "뛰어",
+    "우수",
+    "부족",
+    "평균 이하",
+    "연구 결과",
+    "생산성",
+    "your score",
+    "your level",
+    "diagnosis",
+    "hiring",
+    "job fit",
+    "research shows",
+    "의료",
+    "법률",
+    "금융",
+    "투자",
+    "medical",
+    "legal advice",
+    "financial advice",
+    "%",
+)
+
+
+def _registry_body_without_scope_note(answer: str) -> str:
+    """Drop the mixed-input suffix, which ``validate_registry_scope_note`` owns."""
+
+    head, _, _ = answer.partition(SCOPE_SECTION_MARKER)
+    return head
+
+
+def _unverified_prose(answer: str, context: GroundedAnswerContext) -> str:
+    """Return the answer with every verbatim-reproduced fact span removed.
+
+    Registered definitions and the rendered hierarchy are reproduced word for
+    word by contract, so they are facts rather than writer prose.  Everything
+    that remains is treated as prose even when it looks like a fact line: a
+    fabricated sentence must not escape the check merely by opening with a
+    registered name.
+    """
+
+    remainder = answer
+    verified = [
+        span
+        for span in (*context.exact_definitions.values(), context.hierarchy_text or "")
+        if span
+    ]
+    for span in sorted(verified, key=len, reverse=True):
+        remainder = remainder.replace(span, " ")
+    return remainder
+
+
+def _registry_prose_is_safe(answer: str, context: GroundedAnswerContext) -> bool:
+    """Reject interpretive prose that introduces no new name or number.
+
+    ``validate_grounded_answer`` already blocks unlisted registry names and
+    unlisted numbers.  The remaining gap is an editorial or definitional
+    sentence assembled purely from allowed vocabulary, which the previous
+    exact-copy requirement used to block as a side effect.
+    """
+
+    prose = _unverified_prose(answer, context)
+    if not definition_claim_is_absent(prose):
+        return False
+    lowered = prose.casefold()
+    if any(token.casefold() in lowered for token in _PERSONALIZATION_RISK_TOKENS):
+        return False
+    # A registered name as the topic of a new sentence is how a pseudo
+    # definition gets in.  The deterministic rendering never uses that form —
+    # it attaches facts with 의/에는/이(가) — so banning it costs nothing.
+    return not any(
+        re.search(
+            rf"(?:^|\n|(?<=[.!?])\s)\s*(?:[-*•]\s*)?(?:\d+[.)]\s*)?"
+            rf"{re.escape(name)}\s*(?:은|는)\s",
+            prose,
+        )
+        for name in context.allowed_names
+    )
+
+
+_KOREAN_GREETING_TOKENS = ("안녕", "반갑")
+# Word boundaries matter here: a bare ``hi`` substring also fires on
+# "hierarchy", which is ordinary registry vocabulary rather than a greeting.
+_ENGLISH_GREETING_PATTERN = re.compile(
+    r"\b(?:hello|hi|nice to meet|welcome)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_greeting_text(text: str) -> bool:
+    segment = re.sub(r"\s+", " ", text).strip()
+    return any(token in segment for token in _KOREAN_GREETING_TOKENS) or bool(
+        _ENGLISH_GREETING_PATTERN.search(segment)
+    )
+
+
 def _registry_greeting_is_safe(text: str) -> bool:
     segment = re.sub(r"\s+", " ", text).strip()
     if not segment or len(segment) > 160:
@@ -1181,42 +1307,53 @@ def _registry_greeting_is_safe(text: str) -> bool:
         )
     ):
         return False
-    return any(
-        token in lowered
-        for token in ("안녕", "반갑", "hello", "hi", "nice to meet", "welcome")
-    )
+    return _is_greeting_text(segment)
 
 
-def _registry_reference_framing_is_valid(
+def _first_sentence(text: str) -> tuple[str, str]:
+    """Split the leading sentence from the rest of a block of prose."""
+
+    boundary = re.search(r"(?<=[.!?])\s+|\n", text)
+    if boundary is None:
+        return text.strip(), ""
+    return text[: boundary.start()].strip(), text[boundary.end() :].strip()
+
+
+def _registry_structure_is_valid(
     answer: str,
-    reference: str,
     *,
     acknowledge_greeting: bool,
     scope_topic: ScopeTopic | None,
 ) -> bool:
-    if answer.count(reference) != 1:
+    """Check only the optional sections that surround the registry body.
+
+    The body itself is owned by ``validate_grounded_answer`` and
+    ``_registry_prose_is_safe``.  Requiring it to reproduce the deterministic
+    rendering word for word would reduce the writer to a copier and turn every
+    formatting difference into a failure.
+    """
+
+    if answer.count(SCOPE_SECTION_MARKER) > 1:
         return False
-    prefix, suffix = answer.split(reference, 1)
-    prefix = prefix.strip()
-    suffix = suffix.strip()
+    head, marker, scope_note = answer.partition(SCOPE_SECTION_MARKER)
+    if scope_topic is None:
+        if marker:
+            return False
+    elif not marker or not validate_registry_scope_note(
+        scope_note.strip(),
+        category=scope_topic.category,
+        summary=scope_topic.summary,
+    ):
+        return False
+
+    body = head.strip()
+    if not body:
+        return False
+    opening, remainder = _first_sentence(body)
     if acknowledge_greeting:
-        if not _registry_greeting_is_safe(prefix):
-            return False
-    elif prefix:
-        return False
-    if scope_topic is not None:
-        if not suffix.startswith("[지원 범위]"):
-            return False
-        scope = suffix.removeprefix("[지원 범위]").strip()
-        if not validate_registry_scope_note(
-            scope,
-            category=scope_topic.category,
-            summary=scope_topic.summary,
-        ):
-            return False
-    elif suffix:
-        return False
-    return True
+        return bool(remainder) and _registry_greeting_is_safe(opening)
+    # An unrequested greeting is still a writer addition, so it stays blocked.
+    return not _is_greeting_text(opening)
 
 
 def _guidance_is_safe(
@@ -1263,41 +1400,7 @@ def _guidance_is_safe(
         for definition in context.exact_definitions.values()
     ):
         return False
-    guidance_risk_tokens = (
-        "당신",
-        "사용자",
-        "현재 수준",
-        "현재 상태",
-        "점수",
-        "등급",
-        "진단",
-        "채용",
-        "합격",
-        "적합",
-        "취업",
-        "가능성",
-        "뛰어",
-        "우수",
-        "부족",
-        "평균 이하",
-        "연구 결과",
-        "생산성",
-        "your score",
-        "your level",
-        "diagnosis",
-        "hiring",
-        "job fit",
-        "research shows",
-        "의료",
-        "법률",
-        "금융",
-        "투자",
-        "medical",
-        "legal advice",
-        "financial advice",
-        "%",
-    )
-    if any(token.casefold() in lowered for token in guidance_risk_tokens):
+    if any(token.casefold() in lowered for token in _PERSONALIZATION_RISK_TOKENS):
         return False
     numeric_scan = re.sub(
         r"(?<![A-Za-z0-9])\d+\s*(?:분|시간|회|minutes?|hours?|times?)(?![A-Za-z0-9])",
@@ -1411,7 +1514,6 @@ def _registry_answer_is_valid(
         if sections is None:
             return False
         prefix, facts, guidance, scope = sections
-        reference = _registry_reference_answer(context, mode)
         greeting_valid = (
             _registry_greeting_is_safe(prefix)
             if acknowledge_greeting
@@ -1429,19 +1531,24 @@ def _registry_answer_is_valid(
         return (
             greeting_valid
             and scope_valid
-            and facts == reference
             and _answer_is_valid(validate_grounded_answer(facts, context))
+            and _registry_prose_is_safe(facts, context)
             and _guidance_is_safe(guidance, context, _require_registry())
         )
-    reference = _registry_reference_answer(context, mode)
-    if not _registry_reference_framing_is_valid(
+    if not _registry_structure_is_valid(
         candidate,
-        reference,
         acknowledge_greeting=acknowledge_greeting,
         scope_topic=scope_topic,
     ):
         return False
     if not _answer_is_valid(validate_grounded_answer(candidate, context)):
+        return False
+    # The scope suffix is a different genre with its own validator, so the
+    # prose gate only sees the greeting and the registry body.
+    if not _registry_prose_is_safe(
+        _registry_body_without_scope_note(candidate),
+        context,
+    ):
         return False
     if mode == "candidates":
         return (
@@ -1458,6 +1565,39 @@ def _registry_answer_is_valid(
     return True
 
 
+def _guidance_partial_answer(
+    answer: str,
+    context: GroundedAnswerContext,
+    *,
+    acknowledge_greeting: bool,
+    scope_topic: ScopeTopic | None,
+) -> str | None:
+    """Salvage the validated facts when only the suggestion section fails.
+
+    ``_guidance_is_safe`` is deliberately strict, so a single risky phrase in
+    ``[일반 활용 제안]`` used to discard the already validated ``[등록 정보]``
+    section as well.  Dropping just the suggestion turns the answer back into
+    an ordinary registry result, which is then held to the ordinary contract.
+    """
+
+    sections = _split_guidance_answer(answer)
+    if sections is None:
+        return None
+    prefix, facts, _suggestion, scope = sections
+    salvaged = "\n".join(part for part in (prefix, facts) if part)
+    if scope:
+        salvaged = f"{salvaged}\n{SCOPE_SECTION_MARKER}\n{scope}"
+    if not _registry_answer_is_valid(
+        salvaged,
+        context,
+        "result",
+        acknowledge_greeting=acknowledge_greeting,
+        scope_topic=scope_topic,
+    ):
+        return None
+    return salvaged
+
+
 async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
     """Buffer and validate Registry Writer output before any public delta."""
 
@@ -1470,7 +1610,7 @@ async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
     mode = state.get("registry_answer_mode", "result")
     budget = _budget_from_state(state)
     attempts = int(state.get("writer_attempts", 0) or 0)
-    model_input = _registry_writer_input(state, context)
+    retry_issue = ""
 
     while attempts < 2 and budget.remaining_calls > 0:
         attempts += 1
@@ -1479,7 +1619,9 @@ async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
         try:
             async for chunk in astream_with_budget(
                 _registry_writer_for(selected_answer_model_name()),
-                model_input,
+                # Rebuilt every attempt so a retry carries why the previous
+                # draft was rejected, mirroring the Scope Writer.
+                _registry_writer_input(state, context, retry_issue=retry_issue),
                 budget=budget,
             ):
                 text = _chunk_text(chunk)
@@ -1503,10 +1645,11 @@ async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
                     "llm_call_count": budget.used_calls,
                     "writer_failed": False,
                 }
+            retry_issue = "registry_draft_validation_failed"
         except asyncio.CancelledError:
             raise
         except Exception:
-            continue
+            retry_issue = "registry_writer_request_failed"
 
     return {
         "registry_answer": "",
@@ -1517,40 +1660,92 @@ async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
 
 
 def validate_registry_answer_node(state: CompetencyState) -> dict[str, Any]:
-    """Revalidate the buffered answer, then publish and checkpoint it once."""
+    """Revalidate the buffered answer, then publish and checkpoint it once.
+
+    A writer that never produced a publishable draft is recovered with the
+    deterministic grounded rendering rather than the shared failure notice.
+    That rendering is built from the same validated context, so it cannot
+    introduce a fact the writer was denied.  ``FIXED_FAILURE_MESSAGE`` is
+    reserved for real system failures, such as a grounding context that
+    cannot be built at all.
+    """
 
     answer = state.get("registry_answer", "").strip()
     mode = state.get("registry_answer_mode", "result")
     try:
         context = _registry_grounding_context(state)
-        valid = _registry_answer_is_valid(
-            answer,
-            context,
-            mode,
-            acknowledge_greeting=bool(state.get("acknowledge_greeting")),
-            scope_topic=_mixed_scope_topic(state),
-        )
     except Exception:
-        valid = False
-    if not valid:
+        # Without a context neither validation nor deterministic recovery is
+        # possible, so this is the one registry path that stays a hard failure.
         return {
             "registry_answer": "",
             "writer_failed": True,
             "next_route": "fixed_failure_message",
         }
 
+    acknowledge_greeting = bool(state.get("acknowledge_greeting"))
+    scope_topic = _mixed_scope_topic(state)
+    try:
+        valid = _registry_answer_is_valid(
+            answer,
+            context,
+            mode,
+            acknowledge_greeting=acknowledge_greeting,
+            scope_topic=scope_topic,
+        )
+    except Exception:
+        valid = False
+
+    try:
+        salvaged = (
+            None
+            if valid or mode != "guidance"
+            else _guidance_partial_answer(
+                answer,
+                context,
+                acknowledge_greeting=acknowledge_greeting,
+                scope_topic=scope_topic,
+            )
+        )
+    except Exception:
+        salvaged = None
+
+    response_mode: Literal["llm", "guidance_partial", "registry_fallback"]
+    if valid:
+        published = answer
+        response_mode = "llm"
+    elif salvaged is not None:
+        published = salvaged
+        response_mode = "guidance_partial"
+        _record_runtime_metric("guidance_partial", "all")
+    else:
+        # ``render_grounded_fallback`` already caps its own length and may
+        # legitimately return the over-length notice, so only emptiness can
+        # still block publication here.
+        published = _registry_reference_answer(context, mode).strip()
+        if not published:
+            return {
+                "registry_answer": "",
+                "writer_failed": True,
+                "next_route": "fixed_failure_message",
+            }
+        response_mode = "registry_fallback"
+        _record_runtime_metric("registry_fallback", mode)
+
     _safe_custom_event(
-        {"type": "delta", "text": answer, "commit_required": True}
+        {"type": "delta", "text": published, "commit_required": True}
     )
     _record_runtime_metric(
         "llm_calls",
         f"registry.{int(state.get('llm_call_count', 0) or 0)}",
     )
     update: dict[str, Any] = {
-        "messages": AIMessage(content=answer),
+        "messages": AIMessage(content=published),
         "registry_answer": "",
-        "writer_failed": False,
-        "response_mode": "llm",
+        # The recovery path still terminates normally; the flag stays true so
+        # operations can separate a writer failure from a clean writer turn.
+        "writer_failed": response_mode != "llm",
+        "response_mode": response_mode,
         "next_route": END,
     }
     if mode == "candidates":
@@ -1576,7 +1771,11 @@ def validate_registry_answer_node(state: CompetencyState) -> dict[str, Any]:
 def route_after_registry_validation(
     state: CompetencyState,
 ) -> Literal["fixed_failure_message", "__end__"]:
-    if state.get("next_route") == END and not state.get("writer_failed"):
+    # ``writer_failed`` stays true on the deterministic recovery path, which
+    # still publishes and terminates normally.  Mirroring
+    # ``route_after_scope_writer``, only an explicit failure route falls
+    # through to the shared failure notice.
+    if state.get("next_route") == END:
         return END
     return "fixed_failure_message"
 

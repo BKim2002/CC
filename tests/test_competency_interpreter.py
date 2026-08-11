@@ -18,9 +18,11 @@ from competency_query import (
     ParsedRegistryQuery,
     QueryIntent,
     RegistryQueryPlan,
+    RelationType,
     build_grounded_answer_context,
     execute_registry_query,
     render_grounded_fallback,
+    validate_grounded_answer,
     validate_parsed_query,
 )
 from competency_registry import RegistrySnapshot, build_registry_snapshot
@@ -936,10 +938,12 @@ def test_registry_delta_is_checkpointed_before_public_stream_can_cancel(
     assert saved["registry_answer"] == ""
 
 
-def test_changed_registry_definition_is_never_public_and_ends_in_fixed_failure(
+def test_changed_registry_definition_is_never_public_and_recovers_with_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _validated_registry_state()
+    context = competency_interpreter._registry_grounding_context(state)
+    expected = competency_interpreter._registry_reference_answer(context, "result")
     altered = "책임성의 정의는 맡은 일을 대충 수행하는 특성입니다."
     events: list[dict[str, Any]] = []
     writer = StreamingWriter(altered, role="registry_writer")
@@ -948,19 +952,412 @@ def test_changed_registry_definition_is_never_public_and_ends_in_fixed_failure(
 
     draft = asyncio.run(competency_interpreter.write_registry_answer(state))
     validation = competency_interpreter.validate_registry_answer_node({**state, **draft})
-    final = competency_interpreter.fixed_failure_message({**state, **draft, **validation})
 
     assert draft["writer_failed"] is True
     assert draft["writer_attempts"] == 2
     assert draft["llm_call_count"] == 3
     assert len(writer.inputs) == 2
     assert altered not in str(events)
-    assert final["messages"].content == FIXED_FAILURE_MESSAGE
+    # D3: the rejected draft is replaced by the deterministic rendering, not
+    # by the shared failure notice.
+    assert validation["response_mode"] == "registry_fallback"
+    assert validation["messages"].content == expected
+    assert validation["next_route"] == END
     assert events[-1] == {
         "type": "delta",
-        "text": FIXED_FAILURE_MESSAGE,
+        "text": expected,
         "commit_required": True,
     }
+    assert competency_interpreter.route_after_registry_validation(
+        {**state, **draft, **validation}
+    ) == END
+
+
+def test_d3_registry_writer_exhaustion_publishes_deterministic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace: list[str] = []
+    _patch_models(
+        monkeypatch,
+        gateway=SequenceGateway(
+            [
+                registry_decision(
+                    target_mentions=["책임성"],
+                    constraint_mentions=[{"kind": "field", "text": "정의"}],
+                )
+            ],
+            trace,
+        ),
+        registry_writer=StreamingWriter(
+            "레지스트리와 무관한 문장입니다.",
+            role="registry_writer",
+            trace=trace,
+        ),
+    )
+
+    result = _invoke(_compiled(), "책임성의 정의를 알려줘")
+
+    context = competency_interpreter._registry_grounding_context(result)
+    expected = competency_interpreter._registry_reference_answer(context, "result")
+
+    assert trace == ["gateway", "registry_writer", "registry_writer"]
+    assert result["llm_call_count"] == 3
+    assert result["response_mode"] == "registry_fallback"
+    assert result["writer_failed"] is True
+    assert result["messages"][-1].content == expected
+    assert result["messages"][-1].content != FIXED_FAILURE_MESSAGE
+    # Follow-up context is preserved: the published facts are the real result.
+    assert result["last_result_ids"] == list(result["result_ids"])
+
+
+def test_d3_missing_grounding_context_still_uses_fixed_failure() -> None:
+    # A plan that cannot be revalidated leaves no context to render from, so
+    # this stays the one registry path that ends in the shared failure notice.
+    broken = {
+        "messages": [HumanMessage(content="책임성의 정의를 알려줘")],
+        "raw_query": "책임성의 정의를 알려줘",
+        "query_plan": {},
+        "query_result": {},
+        "registry_answer_mode": "result",
+        "registry_answer": "",
+    }
+
+    validation = competency_interpreter.validate_registry_answer_node(broken)
+
+    assert validation["next_route"] == "fixed_failure_message"
+    assert validation["writer_failed"] is True
+    assert "messages" not in validation
+    assert competency_interpreter.route_after_registry_validation(
+        {**broken, **validation}
+    ) == "fixed_failure_message"
+
+
+def _context_for(parsed: ParsedRegistryQuery) -> Any:
+    snapshot = competency_interpreter._require_registry()
+    validation = validate_parsed_query(parsed, snapshot, user_question="테스트 질문")
+    assert validation.plan is not None
+    result = execute_registry_query(validation.plan, snapshot)
+    return build_grounded_answer_context(validation.plan, result, snapshot)
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        ParsedRegistryQuery(
+            intent=QueryIntent.ITEM_LOOKUP,
+            target_names=["책임성"],
+            fields=[ItemField.DEFINITION],
+        ),
+        ParsedRegistryQuery(
+            intent=QueryIntent.ITEM_LOOKUP,
+            target_names=["책임성", "인지력"],
+            fields=[ItemField.DEFINITION],
+        ),
+        ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY),
+        ParsedRegistryQuery(intent=QueryIntent.HIERARCHY_QUERY),
+        ParsedRegistryQuery(intent=QueryIntent.AGGREGATE_QUERY),
+        ParsedRegistryQuery(
+            intent=QueryIntent.RELATION_QUERY,
+            target_names=["인지력"],
+            relation=RelationType.CHILDREN,
+        ),
+        ParsedRegistryQuery(
+            intent=QueryIntent.RELATION_QUERY,
+            target_names=["수인지력"],
+            relation=RelationType.PARENT,
+        ),
+        ParsedRegistryQuery(
+            intent=QueryIntent.COMPARISON_QUERY,
+            target_names=["책임성", "인지력"],
+            fields=[ItemField.DEFINITION],
+        ),
+    ],
+    ids=[
+        "item_definition",
+        "item_multi",
+        "catalog",
+        "hierarchy",
+        "aggregate",
+        "relation_children",
+        "relation_parent",
+        "comparison",
+    ],
+)
+def test_d2_deterministic_reference_passes_the_prose_gate(
+    parsed: ParsedRegistryQuery,
+) -> None:
+    # The recovery rendering is what D3 publishes, so the prose gate must never
+    # reject the very text the system falls back to.
+    context = _context_for(parsed)
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+
+    assert competency_interpreter._registry_prose_is_safe(reference, context)
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "책임성은 리더십의 핵심입니다.",
+        "책임성은 조직 성과와 밀접한 관계입니다.",
+        "이 역량은 맡은 일을 끝까지 해내는 능력입니다.",
+        "당신의 현재 수준을 보면 충분합니다.",
+        "이 활동은 생산성을 높입니다.",
+        "이 역량은 채용에서 중요하게 평가됩니다.",
+    ],
+)
+def test_d2_prose_gate_rejects_interpretive_claims_without_new_names(
+    claim: str,
+) -> None:
+    # None of these add an unlisted name or number, so ``validate_grounded_answer``
+    # alone would accept them once the exact-copy requirement is gone.
+    context = _context_for(
+        ParsedRegistryQuery(
+            intent=QueryIntent.ITEM_LOOKUP,
+            target_names=["책임성"],
+            fields=[ItemField.DEFINITION],
+        )
+    )
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+    candidate = f"{reference}\n{claim}"
+
+    assert competency_interpreter._answer_is_valid(
+        validate_grounded_answer(candidate, context)
+    )
+    assert not competency_interpreter._registry_prose_is_safe(candidate, context)
+
+
+def test_d2_unverified_prose_strips_definitions_and_hierarchy() -> None:
+    context = _context_for(
+        ParsedRegistryQuery(
+            intent=QueryIntent.ITEM_LOOKUP,
+            target_names=["책임성"],
+            fields=[ItemField.DEFINITION],
+        )
+    )
+    definition = next(iter(context.exact_definitions.values()))
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+
+    prose = competency_interpreter._unverified_prose(reference, context)
+
+    assert definition
+    assert definition in reference
+    assert definition not in prose
+
+
+def test_d2_scope_suffix_is_excluded_from_the_prose_gate() -> None:
+    # The mixed-input note is a different genre owned by
+    # ``validate_registry_scope_note``; the prose gate must not see it.
+    body = "현재 조건에 맞는 등록 항목은 총 1개입니다."
+    scope = "오늘 날씨는 확인하지 않습니다."
+
+    assert competency_interpreter._registry_body_without_scope_note(
+        f"{body}\n{competency_interpreter.SCOPE_SECTION_MARKER}\n{scope}"
+    ).strip() == body
+
+
+def _lookup_context() -> Any:
+    return _context_for(
+        ParsedRegistryQuery(
+            intent=QueryIntent.ITEM_LOOKUP,
+            target_names=["책임성"],
+            fields=[ItemField.DEFINITION],
+        )
+    )
+
+
+def _rephrased_lookup_answers(definition: str, reference: str) -> dict[str, str]:
+    """Answers that keep every validated fact but do not copy the rendering."""
+
+    body = f"1. 책임성\n책임성의 등록된 정의는 다음과 같습니다: {definition}"
+    return {
+        "lead_in_sentence": (
+            "요청하신 내용을 등록 정보에서 확인했습니다. "
+            f"현재 조건에 맞는 등록 항목은 총 1개입니다.\n\n{body}"
+        ),
+        "reworded_framing": f"등록된 항목은 총 1개 확인됩니다.\n\n{body}",
+        "closing_line": f"{reference}\n더 좁은 범위로 이어서 물어보실 수 있습니다.",
+    }
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["lead_in_sentence", "reworded_framing", "closing_line"],
+)
+def test_d1_rephrased_answer_that_preserves_every_fact_is_accepted(
+    variant: str,
+) -> None:
+    # This is the whole point of D1: before it, only a byte-identical copy of
+    # ``render_grounded_fallback`` could pass.
+    context = _lookup_context()
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+    definition = next(iter(context.exact_definitions.values()))
+    answer = _rephrased_lookup_answers(definition, reference)[variant]
+
+    assert answer != reference
+    assert competency_interpreter._registry_answer_is_valid(answer, context, "result")
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["definition_altered", "definition_dropped", "extra_name", "wrong_count"],
+)
+def test_d1_relaxed_validation_still_blocks_fact_tampering(tamper: str) -> None:
+    context = _lookup_context()
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+    definition = next(iter(context.exact_definitions.values()))
+    answers = {
+        "definition_altered": reference.replace(definition, "맡은 일을 대충 하는 특성"),
+        "definition_dropped": reference.replace(definition, ""),
+        "extra_name": f"{reference}\n인지력도 함께 확인했습니다.",
+        "wrong_count": reference.replace("1개", "7개"),
+    }
+
+    assert not competency_interpreter._registry_answer_is_valid(
+        answers[tamper], context, "result"
+    )
+
+
+def test_d1_greeting_is_required_and_rejected_by_the_same_structure_check() -> None:
+    context = _lookup_context()
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+    greeted = f"안녕하세요. {reference}"
+
+    assert competency_interpreter._registry_answer_is_valid(
+        greeted, context, "result", acknowledge_greeting=True
+    )
+    # An unrequested greeting is still a writer addition.
+    assert not competency_interpreter._registry_answer_is_valid(
+        greeted, context, "result", acknowledge_greeting=False
+    )
+    # A requested greeting that never arrived is still a contract violation.
+    assert not competency_interpreter._registry_answer_is_valid(
+        reference, context, "result", acknowledge_greeting=True
+    )
+
+
+def test_d1_hierarchy_wording_is_not_mistaken_for_an_english_greeting() -> None:
+    # A bare "hi" substring also fires on "hierarchy"; the greeting probe is
+    # word-anchored so ordinary registry vocabulary stays usable.
+    assert not competency_interpreter._is_greeting_text("The hierarchy is deep")
+    assert competency_interpreter._is_greeting_text("Hi, nice to meet you")
+    assert competency_interpreter._is_greeting_text("안녕하세요")
+
+
+def test_d4_unsafe_suggestion_section_is_dropped_and_facts_are_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _validated_registry_state()
+    state["registry_answer_mode"] = "guidance"
+    context = competency_interpreter._registry_grounding_context(state)
+    facts = competency_interpreter._registry_reference_answer(context, "guidance")
+    unsafe = "당신의 현재 수준은 충분히 뛰어납니다."
+    state["registry_answer"] = f"[등록 정보]\n{facts}\n\n[일반 활용 제안]\n{unsafe}"
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(competency_interpreter, "get_stream_writer", lambda: events.append)
+
+    update = competency_interpreter.validate_registry_answer_node(state)
+
+    # The whole answer is invalid, but the facts alone still satisfy the
+    # ordinary registry contract, so they are published instead of discarded.
+    assert not competency_interpreter._registry_answer_is_valid(
+        state["registry_answer"], context, "guidance"
+    )
+    assert update["response_mode"] == "guidance_partial"
+    assert update["messages"].content == facts
+    assert unsafe not in update["messages"].content
+    assert "[일반 활용 제안]" not in update["messages"].content
+    assert update["next_route"] == END
+    assert events[-1]["commit_required"] is True
+
+
+def test_d4_malformed_guidance_sections_fall_through_to_registry_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _validated_registry_state()
+    state["registry_answer_mode"] = "guidance"
+    context = competency_interpreter._registry_grounding_context(state)
+    expected = competency_interpreter._registry_reference_answer(context, "guidance")
+    # No section markers at all, so there is nothing to salvage selectively.
+    state["registry_answer"] = "책임성은 리더십의 핵심입니다."
+    monkeypatch.setattr(competency_interpreter, "get_stream_writer", lambda: [].append)
+
+    update = competency_interpreter.validate_registry_answer_node(state)
+
+    assert update["response_mode"] == "registry_fallback"
+    assert update["messages"].content == expected
+
+
+def test_d6_registry_writer_retry_carries_the_rejection_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _validated_registry_state()
+    context = competency_interpreter._registry_grounding_context(state)
+    reference = competency_interpreter._registry_reference_answer(context, "result")
+    outputs = ["레지스트리와 무관한 문장입니다.", reference]
+    writer = StreamingWriter(
+        lambda _model_input: outputs.pop(0),
+        role="registry_writer",
+    )
+    monkeypatch.setattr(competency_interpreter, "_registry_writer_for", lambda _: writer)
+
+    draft = asyncio.run(competency_interpreter.write_registry_answer(state))
+
+    assert draft["writer_failed"] is False
+    assert draft["writer_attempts"] == 2
+    assert len(writer.inputs) == 2
+    first = str(writer.inputs[0][-1][1])
+    second = str(writer.inputs[1][-1][1])
+    assert "재생성 사유 코드: none" in first
+    assert "재생성 사유 코드: registry_draft_validation_failed" in second
+
+
+def test_d5_exhausted_budget_on_the_semantic_path_recovers_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gateway retry (2 calls) + semantic selector (1 call) leaves the writer no
+    # slot at all.  Before D3 that combination could only end in the shared
+    # failure notice.
+    trace: list[str] = []
+    _patch_models(
+        monkeypatch,
+        gateway=SequenceGateway(
+            [
+                {"route": "bad"},
+                registry_decision(
+                    intent="semantic_search",
+                    semantic_description="주도적으로 일함",
+                    constraint_mentions=[{"kind": "field", "text": "역량"}],
+                ),
+            ],
+            trace,
+        ),
+        selector=SequenceSelector(
+            [
+                {
+                    "candidate_names": ["책임성"],
+                    "confidence": "low",
+                    "auto_select": False,
+                }
+            ],
+            trace,
+        ),
+        registry_writer=StreamingWriter(
+            _reference_answer,
+            role="registry_writer",
+            trace=trace,
+        ),
+    )
+
+    result = _invoke(_compiled(), "주도적으로 일하는 역량은?")
+
+    # The writer is never reached: the budget is already spent.
+    assert trace == ["gateway", "gateway", "semantic_selector"]
+    assert result["llm_call_count"] == 3
+    assert result["registry_answer_mode"] == "candidates"
+    assert result["response_mode"] == "registry_fallback"
+    assert result["messages"][-1].content != FIXED_FAILURE_MESSAGE
+    assert "책임성" in result["messages"][-1].content
+    assert result["candidate_names"] == ["책임성"]
 
 
 def test_registry_validator_rejects_contradiction_after_exact_reference() -> None:
