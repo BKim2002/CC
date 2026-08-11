@@ -417,8 +417,7 @@ async function streamQuestion(question, controller, bubble) {
     }
 
     if (eventName === "error") {
-      // General Writer의 잠정 delta는 실패하거나 취소된 답변이 아니다.
-      // 오류가 확정되면 즉시 비워 checkpoint 복원 전에도 화면에 남기지 않는다.
+      // 오류가 확정되면 잠정 표시를 즉시 비워 checkpoint 복원 전에도 남기지 않는다.
       visibleAnswer = "";
       setBubbleText(bubble, "");
       streamError = new Error(

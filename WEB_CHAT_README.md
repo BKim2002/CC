@@ -9,9 +9,10 @@
 - `static/index.html`: 채팅 화면 구조
 - `static/style.css`: 반응형 채팅 UI
 - `static/chat.js`: 대화 생성·SSE 스트리밍·복원과 후보 버튼 처리
-- `competency_query.py`: stable ID 기반 목록·위계·관계·집계·비교 엔진과 grounding 검증
-- `llm_gateway.py`: strict Gateway 계약, 단일 capability manifest, 역할별 모델 설정과 턴당 호출 예산
-- `competency_interpreter.py`: Gateway 우선·Registry/General 이중 Writer LangGraph, 활성 레지스트리 스냅샷, PostgreSQL 체크포인터
+- `competency_query.py`: Gateway 초안을 active registry와 stable ID로 정규화하는 Query Normalizer, 목록·위계·관계·집계·비교 엔진과 grounding 검증
+- `llm_gateway.py`: 세 가지 strict Gateway route, Scope 응답 계약, 단일 capability manifest, 역할별 모델 설정과 턴당 호출 예산
+- `scope_response.py`: 미지원·메타 대화의 필드별 안전성 검증, topic-aware 결정적 fallback, 공개 문자열 정규화
+- `competency_interpreter.py`: Gateway → Query Normalizer/Scope Writer로 분기하는 Registry-first LangGraph, 활성 레지스트리 스냅샷, PostgreSQL 체크포인터
 - `competency_registry.py`: PostgreSQL 활성 레지스트리의 검증·인덱스 생성
 - `scripts/setup_checkpoint_database.py`: LangGraph 체크포인트 테이블 준비
 - `scripts/setup_competency_registry_database.py`: 버전형 역량 레지스트리 스키마 준비
@@ -50,7 +51,7 @@ OPENAI_ANSWER_MODEL=gpt-5.6-luna
 DATABASE_URL=postgresql://사용자명:비밀번호@호스트:5432/데이터베이스명?sslmode=require
 ```
 
-모든 입력은 먼저 Entry 모델의 LLM Gateway를 거치고, 모든 정상 답변은 Answer 모델의 Registry Writer 또는 General Writer가 작성하므로 OpenAI 키가 필요하다. 각 역할별 설정이 비어 있으면 기존 `OPENAI_MODEL`, 그것도 비어 있으면 `gpt-5.6-luna`를 사용한다. SDK 자동 재시도는 끄고 애플리케이션이 실제 API 요청을 턴당 최대 3회로 제한한다.
+모든 입력은 먼저 Entry 모델의 LLM Gateway를 거친다. 레지스트리 질의의 설명은 Registry Writer가, 인사·소개·범위 밖 질문의 경계 안내는 Scope Writer가 작성하므로 OpenAI 키가 필요하다. 각 역할별 설정이 비어 있으면 기존 `OPENAI_MODEL`, 그것도 비어 있으면 `gpt-5.6-luna`를 사용한다. SDK 자동 재시도는 끄고 애플리케이션이 실제 API 요청을 턴당 최대 3회로 제한한다.
 
 ## PostgreSQL 최초 준비와 레지스트리 적재
 
@@ -217,9 +218,9 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 - 직전 결과에 대한 필터: `그중 영상면접만`, `그중 분석에 포함되는 것만`
 - 행동 설명을 통한 최대 3개의 등록 후보 탐색과 고확신 단일 후보 자동 조회
 - 등록 사실과 분리된 비개인화 일반 활용 제안: `협력 역량을 높이려면?`
-- 인사, 챗봇 소개, 시사성이 없는 간단한 일반 개념과 `어떤 질문을 할 수 있어?` 같은 사용법 안내
+- 인사·감사·작별, 챗봇 소개와 `어떤 질문을 할 수 있어?` 같은 사용법 안내
 
-개인 역량 점수·진단, 채용 판단, 직무 적합성·추천, 최신 날씨·뉴스 확인, 의료·법률·금융 전문 조언은 지원하지 않는다. 미지원 질문도 오류로 취급하지 않고 General Writer가 현재 확인 범위를 짧게 설명한 뒤 지원되는 역량 질문으로 연결한다.
+개인 역량 점수·진단, 채용 판단, 직무 적합성·추천, 최신 날짜·시간·날씨·뉴스, 일반 지식 설명, 의료·법률·금융 전문 조언, 외부 작업 실행은 지원하지 않는다. 미지원 질문도 오류로 취급하지 않고 Scope Writer가 해당 주제를 짧게 확인한 뒤 범위를 설명하고 지원되는 역량 질문으로 연결한다. Scope Writer 출력이 두 번 검증에 실패하면 질문 원문을 그대로 되풀이하지 않는 topic-aware Python 안내로 정상 종료한다.
 
 필기 역량검사의 `상위요인`, `중위요인`, `하위요인`, `최하위요인`은 현재 공식 단계인 `L1`, `L2`, `L3`, `L4`를 뜻한다. 현재 활성 버전의 회귀 기준은 각각 3개, 10개, 30개, 9개이며, `역검 종합점수`는 이 네 단계 위의 종합점수이므로 상위요인 3개에 포함하지 않는다. 이 숫자는 답변에 하드코딩하지 않고 매번 활성 스냅샷을 필터링해 계산한다.
 
@@ -229,9 +230,9 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 
 목록·위계는 레지스트리의 원래 순서와 `children_ids` 순서를 보존한다. 한 답변은 기본적으로 최대 100개 항목을 렌더링하며, 이를 넘으면 전체 개수와 앞부분을 보여 주고 범위를 좁히도록 안내한다. 정의·경로·자식 목록처럼 긴 상세 사실은 writer 호출 전에 별도의 문자 예산으로 더 일찍 제한하고, 최종 답변은 20,000자를 넘지 않게 검증한다. 비교는 모바일 가독성과 grounding 범위를 위해 최대 3개로 제한한다.
 
-정확한 이름 입력도 예외 없이 `START → llm_gateway → validate_gateway_decision`을 거친다. Gateway는 route와 제한된 registry query 구조만 만들며 사용자 답변을 쓰지 않는다. 이름 검증·목록 필터·관계 탐색·개수 계산·비교 사실 구성은 Python이 active registry와 stable ID로 수행한다.
+정확한 이름 입력도 예외 없이 `START → llm_gateway → validate_gateway_decision`을 거친다. Gateway는 `registry_query`, `meta_conversation`, `out_of_scope` 중 하나와 작은 초안만 만들며 사용자 답변이나 최종 query plan을 쓰지 않는다. Query Normalizer가 사용자 원문과 초안을 대조하고, 이름 검증·목록 필터·관계 탐색·개수 계산·비교 사실 구성은 Python이 active registry와 stable ID로 수행한다. 역량처럼 보이는 미등록 이름은 일반 지식으로 설명하지 않고 미등록 대상으로 안내한다.
 
-레지스트리 결과·후보·역량 관련 재질문은 Registry Writer가, 인사·소개·도움말·간단한 일반 개념·미지원 범위는 General Writer가 담당한다. 활용 제안은 `[등록 정보]`와 `[일반 활용 제안]`을 분리하고 등록 정보 섹션에 기존 grounding 검증을 그대로 적용한다. 정의는 레지스트리 원문을 유지하며, Writer가 최종 검증에 실패해 호출 예산 안에서 복구하지 못하면 Python은 공통 고정 장애 안내만 반환한다. 결정적 Python 답변을 정상 공개 fallback으로 사용하지 않는다.
+레지스트리 결과·후보·역량 관련 재질문은 Registry Writer가, 인사·소개·도움말·미지원 범위는 Scope Writer가 담당한다. 활용 제안은 `[등록 정보]`와 `[일반 활용 제안]`을 분리하고 등록 정보 섹션에 기존 grounding 검증을 그대로 적용한다. 정의는 레지스트리 원문을 유지한다. Gateway 또는 registry·checkpoint·grounding의 실제 시스템 실패에만 공통 고정 장애 안내를 쓰며, Scope Writer의 정상 범위 안내 실패는 category·언어를 보존한 결정적 `scope_fallback`으로 복구한다.
 
 ## 채팅 API와 스트리밍
 
@@ -245,9 +246,9 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 }
 ```
 
-`POST /api/chat/stream`은 같은 요청 본문을 받고 UTF-8 `text/event-stream`을 반환한다. 공개 event는 `start`, `status`, `delta`, `replace`, `done`, `error`다. 브라우저는 `fetch()`의 `ReadableStream`으로 frame을 읽어 한 assistant 말풍선에 `delta`를 이어 붙이고, 재시도나 최종 오류에서 `replace`를 받으면 말풍선 전체를 확정 문자열로 바꾼다. 마지막 `done`에는 기존 API와 같은 `thread_id`, 최종 `answer`, active registry에서 재검증한 최대 3개의 `candidates`가 들어간다.
+`POST /api/chat/stream`은 같은 요청 본문을 받고 UTF-8 `text/event-stream`을 반환한다. 공개 event는 `start`, `status`, `delta`, `replace`, `done`, `error`다. 브라우저는 `fetch()`의 `ReadableStream`으로 frame을 읽어 한 assistant 말풍선에 `delta`를 이어 붙이고, 최종 오류에서 `replace`를 받으면 말풍선 전체를 확정 문자열로 바꾼다. 마지막 `done`에는 기존 API와 같은 `thread_id`, 최종 `answer`, active registry에서 재검증한 최대 3개의 `candidates`가 들어간다.
 
-General Writer는 생성 중 delta를 실시간으로 보낼 수 있지만 완성 전 텍스트는 checkpoint하지 않는다. Registry Writer는 전체 출력을 서버에서 버퍼링하고 이름·수치·순서·정의 grounding을 검증한 뒤에만 확정 delta를 공개한다. 취소된 요청은 부분 assistant message를 남기지 않으며, `done.answer`, 비스트리밍 응답, history의 마지막 assistant message는 같은 문자열이다. 중간 상태와 오류 event에는 stable ID, 내부 plan, prompt, DB 연결 정보나 예외 전문을 싣지 않는다.
+Registry Writer와 Scope Writer는 모두 전체 출력을 서버에서 버퍼링하고 검증한다. Registry Writer는 이름·수치·순서·정의 grounding을, Scope Writer는 route·category·capability manifest·직접 답변 부재를 확인한 뒤 checkpoint에 동일한 AIMessage가 저장된 경우에만 확정 delta를 공개한다. 거부된 초안과 예외 전문은 상태나 event에 넣지 않는다. 취소된 요청은 부분 assistant message를 남기지 않으며, `done.answer`, 비스트리밍 응답, history의 마지막 assistant message는 byte-for-byte 같은 문자열이다. 중간 상태와 오류 event에는 stable ID, 내부 plan, prompt, DB 연결 정보나 예외 전문을 싣지 않는다.
 
 ## Vercel 배포
 
@@ -327,7 +328,8 @@ python -m pytest -q
 - 서버 상태와 UUID 대화 생성
 - 공백·길이·잘못된 UUID·추가 필드 검증
 - 정확한 역량 질문과 체크포인트 기록
-- 정확한 이름을 포함한 모든 입력의 Gateway 우선 처리와 일반·직접 질의 2회/의미 검색 3회 호출 상한
+- 정확한 이름을 포함한 모든 입력의 Gateway 우선 처리와 직접 질의·Scope 안내 2회/의미 검색 3회 호출 상한
+- Gateway 초안과 사용자 원문을 active registry에 대조하는 Query Normalizer의 plan·clarification·semantic candidate·미등록 대상 분기
 - 전체·검사별·공식 단계별 목록과 동적 집계
 - 임의 깊이·복수 root·가상 상위 라벨의 전체/부분 위계
 - 부모·조상·자식·후손·형제 관계와 registry-backed 비교
@@ -350,7 +352,7 @@ python -m pytest -q
 - 런타임 레지스트리의 프로세스당 1회 로드와 재초기화
 - 공개 정적 파일의 비밀정보 비노출
 - 내부 오류 응답의 경로·예외 정보 비노출
-- Registry Writer의 검증 전 delta 차단, General Writer 취소, SSE event 순서·한국어 chunk 경계·최종 history 일치
+- Registry/Scope Writer의 검증 전 delta 차단, Scope 재시도·topic-aware fallback·취소, SSE event 순서·한국어 chunk 경계·최종 history 일치
 - Node.js에서 실행하는 브라우저 SSE parser·한 말풍선 동기화·후보·중복 전송·새 대화 실패 복원·안전한 `textContent` 렌더링
 - 같은 thread 직렬화와 서로 다른 thread 병렬 실행
 
@@ -366,6 +368,7 @@ python -m pytest -q
 - PostgreSQL에는 사용자의 질문과 챗봇 답변이 저장된다.
 - 같은 프로세스에서는 같은 대화의 동시 요청을 직렬화한다. 여러 프로세스·인스턴스에 걸친 동시 실행 제어는 지원하지 않는다.
 - 브라우저에는 API 키, DB 경로, 시스템 프롬프트, 전체 LangGraph 내부 상태를 전달하지 않는다.
+- 프로세스별 안전 집계는 `runtime_metric_snapshot()`과 `runtime_metric` 로그로 확인할 수 있다. Gateway route, normalizer rule/issue, Scope 첫 실패·재시도·fallback, fixed failure와 경로별 호출 수만 기록하며 원문 질문·정의·prompt·URL·예외 전문은 기록하지 않는다.
 
 ## 수동 확인 항목
 

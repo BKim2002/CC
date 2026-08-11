@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import competency_query
 import pytest
 from pydantic import ValidationError
 
@@ -8,17 +9,25 @@ from competency_query import (
     HierarchyTier,
     ItemField,
     MAX_ANSWER_CHARS,
+    NormalizationIssueCode,
+    NormalizationOption,
+    NormalizationOutcome,
     ParsedRegistryQuery,
     QueryFilters,
     QueryIntent,
     QueryScope,
     RegistryQueryPlan,
+    RegistryNormalizationIssue,
+    RegistryNormalizationResult,
     RelationType,
+    SemanticCandidateRequest,
+    UnregisteredTargetResult,
     WRITTEN_PROFILE_ID,
     build_grounded_answer_context,
     detect_deterministic_query,
     execute_registry_query,
     node_type_term,
+    normalize_registry_query,
     render_grounded_fallback,
     validate_grounded_answer,
     validate_hierarchy_terminology_profile,
@@ -225,6 +234,26 @@ def _plan(intent: QueryIntent, **updates) -> RegistryQueryPlan:
 
 def _names(result, snapshot) -> list[str]:
     return [snapshot.id_lookup[item_id]["name"] for item_id in result.item_ids]
+
+
+def _draft(
+    intent_hint: str,
+    *,
+    target_mentions: list[str] | None = None,
+    constraint_mentions: list[dict[str, str]] | None = None,
+    semantic_description: str | None = None,
+    reuse_previous_result: bool = False,
+) -> dict:
+    return {
+        "intent_hint": intent_hint,
+        "target_mentions": target_mentions or [],
+        "constraint_mentions": constraint_mentions or [],
+        "semantic_description": semantic_description,
+        "reuse_previous_result": reuse_previous_result,
+        "answer_mode": "registry_facts",
+        "acknowledge_greeting": False,
+        "out_of_scope_remainder": None,
+    }
 
 
 def test_fixture_is_graph_correct_and_profile_matches_current_contract() -> None:
@@ -585,6 +614,977 @@ def test_deterministic_fast_paths(query, intent, detail) -> None:
 
 def test_natural_variant_is_left_for_structured_llm_parser() -> None:
     assert detect_deterministic_query("분석에 들어가는 항목들을 검사별로 묶어서 설명해 줘", _snapshot()) is None
+
+
+def test_f01_f03_natural_tier_counts_share_one_canonical_plan_and_dynamic_total() -> None:
+    snapshot = _snapshot()
+    plans: list[RegistryQueryPlan] = []
+
+    for raw_query in (
+        "하위요인은 총 몇 개야?",
+        "전체 하위요인의 개수가 궁금해",
+        "하위 요인 수 알려줘",
+    ):
+        result = normalize_registry_query(
+            raw_query=raw_query,
+            # The raw, deterministic meaning is authoritative over a wrong
+            # low-priority Gateway hint.
+            draft=_draft(
+                "catalog_query",
+                constraint_mentions=[{"kind": "instrument", "text": "영상면접"}],
+            ),
+            snapshot=snapshot,
+            previous_result_ids=[],
+        )
+        assert result.outcome == NormalizationOutcome.PLAN
+        assert result.plan is not None
+        plans.append(result.plan)
+
+    canonical = [plan.model_dump(exclude={"user_question"}) for plan in plans]
+    assert canonical[0] == canonical[1] == canonical[2]
+    assert plans[0].intent == QueryIntent.AGGREGATE_QUERY
+    assert plans[0].instrument_ids == ["written_competency"]
+    assert plans[0].hierarchy_tiers == [HierarchyTier.LOWER]
+    assert plans[0].scope == QueryScope.ALL
+    assert execute_registry_query(plans[0], snapshot).counts["total"] == 30
+
+
+def test_tier_count_space_underscore_and_hyphen_variants_keep_same_plan() -> None:
+    snapshot = _snapshot()
+    results = [
+        normalize_registry_query(
+            raw_query=raw_query,
+            draft=_draft("aggregate_query"),
+            snapshot=snapshot,
+            previous_result_ids=[],
+        )
+        for raw_query in (
+            "하위 요인은 총 몇 개야?",
+            "하위_요인은 총 몇 개야?",
+            "전체-하위-요인의 개수가 궁금해",
+        )
+    ]
+
+    assert all(result.plan is not None for result in results)
+    canonical = [result.plan.model_dump(exclude={"user_question"}) for result in results if result.plan]
+    assert canonical[0] == canonical[1] == canonical[2]
+
+
+def test_normalizer_exact_raw_target_beats_conflicting_draft_hint() -> None:
+    snapshot = _snapshot()
+    result = normalize_registry_query(
+        raw_query="전략성의 정의를 알려줘",
+        draft=_draft("semantic_search", target_mentions=["표현능력"]),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.intent == QueryIntent.ITEM_LOOKUP
+    assert result.plan.target_ids == [snapshot.canonical_lookup["전략성"]["id"]]
+    assert result.plan.fields == [ItemField.DEFINITION]
+
+
+def test_normalizer_resolves_alias_with_space_underscore_and_particle_variants() -> None:
+    result = normalize_registry_query(
+        raw_query="종합_점수는 뭐야?",
+        draft=_draft("item_lookup", target_mentions=["종합 점수"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.target_ids == ["w-overall"]
+    assert result.plan.hierarchy_tiers == []
+
+
+def test_normalizer_unknown_definition_target_is_typed_unregistered_not_semantic_definition() -> None:
+    result = normalize_registry_query(
+        raw_query="정의감은 뭐야?",
+        draft=_draft("item_lookup", target_mentions=["정의감"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.unregistered_target is not None
+    assert result.unregistered_target.code == NormalizationIssueCode.UNKNOWN_TARGET
+    assert result.unregistered_target.target_mentions == ["정의감"]
+    assert "정확한 역량명" in result.unregistered_target.question
+    assert result.plan is None and result.semantic_request is None
+
+
+def test_normalizer_unknown_target_with_behavior_description_requests_semantic_candidates() -> None:
+    result = normalize_registry_query(
+        raw_query="정의감처럼 갈등 때 다른 사람 말부터 듣는 행동과 가까운 역량을 찾아줘",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["정의감"],
+            semantic_description="갈등 때 다른 사람 말부터 듣는 행동",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+    assert result.semantic_request == SemanticCandidateRequest(
+        semantic_query="갈등 때 다른 사람 말부터 듣는 행동",
+        target_mentions=["정의감"],
+    )
+
+
+def test_draft_semantic_description_without_raw_evidence_cannot_reclassify_unknown_definition() -> None:
+    result = normalize_registry_query(
+        raw_query="정의감은 뭐야?",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["정의감"],
+            semantic_description="갈등에서 공정하게 판단하는 행동",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.unregistered_target is not None
+    assert result.unregistered_target.target_mentions == ["정의감"]
+    assert result.semantic_request is None
+
+
+def test_unknown_name_span_alone_is_not_behavioral_semantic_evidence() -> None:
+    result = normalize_registry_query(
+        raw_query="정의감은 뭐야?",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["정의감"],
+            semantic_description="정의감",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.semantic_request is None
+
+
+def test_behavior_word_inside_unknown_definition_name_is_not_semantic_evidence() -> None:
+    result = normalize_registry_query(
+        raw_query="갈등관리의 정의를 알려줘",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["갈등관리"],
+            semantic_description="갈등관리",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.semantic_request is None
+
+
+@pytest.mark.parametrize("raw_query", ["맡은 일을 끝까지 수행", "주도적으로 일함"])
+def test_raw_behavior_fragments_remain_valid_semantic_candidate_requests(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("semantic_search", semantic_description=raw_query),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+    assert result.semantic_request is not None
+    assert result.semantic_request.semantic_query == raw_query
+
+
+def test_behavior_question_ending_in_mwooya_is_not_mistaken_for_bare_definition() -> None:
+    raw_query = "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?"
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(
+            "semantic_search",
+            semantic_description="맡은 일을 꼼꼼하게 수행",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+    assert result.semantic_request is not None
+    assert result.semantic_request.semantic_query == "맡은 일을 꼼꼼하게 수행"
+
+
+def test_nonsemantic_plan_does_not_store_untrusted_draft_semantic_description() -> None:
+    result = normalize_registry_query(
+        raw_query="전략성의 정의를 알려줘",
+        draft=_draft(
+            "item_lookup",
+            target_mentions=["전략성"],
+            semantic_description="날씨를 알려줘",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.plan is not None
+    assert result.plan.semantic_query is None
+
+
+def test_normalized_label_collision_returns_public_ambiguous_target_choices() -> None:
+    def mutate(items):
+        next(item for item in items if item["name"] == "전략성")["aliases"].append("공통-표현")
+        next(item for item in items if item["name"] == "실행성")["aliases"].append("공통 표현")
+
+    result = normalize_registry_query(
+        raw_query="공통 표현은 뭐야?",
+        draft=_draft("item_lookup", target_mentions=["공통 표현"]),
+        snapshot=_snapshot(mutate=mutate),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.AMBIGUOUS_TARGET
+    assert {option.label for option in result.issue.options} == {"전략성", "실행성"}
+    assert all("w-" not in option.label + option.description for option in result.issue.options)
+
+
+def test_vague_structural_relation_returns_concrete_typed_choices() -> None:
+    result = normalize_registry_query(
+        raw_query="전략성의 상위 항목 알려줘",
+        draft=_draft(
+            "relation_query",
+            target_mentions=["전략성"],
+            constraint_mentions=[{"kind": "relation", "text": "상위 항목"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.AMBIGUOUS_RELATION
+    assert [option.label for option in result.issue.options] == ["직접 상위요인", "모든 상위요인"]
+    assert "한 단계" in result.issue.question and "전체 경로" in result.issue.question
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "relation"),
+    [
+        ("전략성의 상위요인을 알려줘", RelationType.PARENT),
+        ("전략성의 하위요인을 알려줘", RelationType.CHILDREN),
+        ("전략성의 모든 상위를 알려줘", RelationType.ANCESTORS),
+        ("전략성의 모든 하위를 알려줘", RelationType.DESCENDANTS),
+    ],
+)
+def test_target_relative_relation_phrases_auto_correct_only_when_unambiguous(raw_query, relation) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("relation_query", target_mentions=["전략성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.relation == relation
+
+
+def test_related_official_tier_phrase_is_normalized_separately_from_structure_relation() -> None:
+    result = normalize_registry_query(
+        raw_query="기억력 세부 1이 속한 중위요인을 알려줘",
+        draft=_draft(
+            "relation_query",
+            target_mentions=["기억력 세부 1"],
+            constraint_mentions=[{"kind": "hierarchy_tier", "text": "중위요인"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.relation is None
+    assert result.plan.related_tier == HierarchyTier.MIDDLE
+
+
+def test_conflicting_parent_and_children_constraints_are_not_silently_dropped() -> None:
+    result = normalize_registry_query(
+        raw_query="전략성의 상위요인과 하위요인을 알려줘",
+        draft=_draft("relation_query", target_mentions=["전략성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert {option.label for option in result.issue.options} == {"직접 상위요인", "직접 하위요인"}
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "expected_options"),
+    [
+        ("전략성의 상위와 하위를 알려줘", {"직접 상위요인", "직접 하위요인"}),
+        ("전략성의 상위와 모든 하위를 알려줘", {"직접 상위요인", "모든 하위요인"}),
+        ("전략성의 상위 항목과 하위 항목을 알려줘", {"직접 상위요인", "직접 하위요인"}),
+    ],
+)
+def test_coordinated_upper_and_lower_relation_intent_is_never_partially_dropped(
+    raw_query: str,
+    expected_options: set[str],
+) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("relation_query", target_mentions=["전략성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert {option.label for option in result.issue.options} == expected_options
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    ["전략성의 하위 구조를 보여줘", "전략성부터 시작하는 위계를 보여줘"],
+)
+def test_raw_subtree_wording_overrides_item_lookup_hint(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("item_lookup", target_mentions=["전략성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.plan is not None
+    assert result.plan.intent == QueryIntent.HIERARCHY_QUERY
+    assert result.plan.scope == QueryScope.SUBTREE
+    assert result.plan.target_ids == ["w-middle-0-0"]
+
+
+def test_missing_or_retired_previous_result_is_a_typed_issue() -> None:
+    result = normalize_registry_query(
+        raw_query="이전 결과에서 정의를 알려줘",
+        draft=_draft("item_lookup", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["retired-id"],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.MISSING_PREVIOUS_RESULT
+    assert result.issue.options
+
+
+def test_previous_follow_up_revalidates_stable_ids_without_treating_pronoun_as_name() -> None:
+    result = normalize_registry_query(
+        raw_query="그중 정의를 알려줘",
+        draft=_draft("item_lookup", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "retired-id"],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.scope == QueryScope.PREVIOUS_RESULT
+    assert result.plan.target_ids == ["w-middle-0-0"]
+    assert result.plan.previous_result_ids == ["w-middle-0-0"]
+
+
+def test_unknown_explicit_instrument_is_typed_and_lists_only_public_labels() -> None:
+    result = normalize_registry_query(
+        raw_query="성격검사의 역량 목록을 보여줘",
+        draft=_draft(
+            "catalog_query",
+            constraint_mentions=[{"kind": "instrument", "text": "성격검사"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.UNKNOWN_INSTRUMENT
+    assert {option.label for option in result.issue.options} == {"필기 역량검사", "영상면접"}
+
+
+def test_known_video_instrument_and_written_tier_are_a_constraint_conflict_not_unknown_instrument() -> None:
+    result = normalize_registry_query(
+        raw_query="영상면접의 상위요인 목록을 보여줘",
+        draft=_draft(
+            "catalog_query",
+            constraint_mentions=[
+                {"kind": "instrument", "text": "영상면접"},
+                {"kind": "hierarchy_tier", "text": "상위요인"},
+            ],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert {option.label for option in result.issue.options} == {
+        "필기 역량검사 단계",
+        "선택한 검사 구조",
+    }
+
+
+def test_normalization_result_rejects_zero_or_multiple_payloads() -> None:
+    with pytest.raises(ValidationError):
+        RegistryNormalizationResult(outcome=NormalizationOutcome.PLAN)
+
+    with pytest.raises(ValidationError):
+        RegistryNormalizationResult(
+            outcome=NormalizationOutcome.CLARIFICATION,
+            plan=RegistryQueryPlan(intent=QueryIntent.CATALOG_QUERY),
+            issue=RegistryNormalizationIssue(
+                code=NormalizationIssueCode.MISSING_TARGET,
+                question="대상을 알려 주세요.",
+                options=[NormalizationOption(label="역량명", description="정식 이름")],
+            ),
+        )
+
+
+def test_normalizer_accepts_gateway_like_model_without_importing_gateway_module() -> None:
+    class GatewayDraftDouble:
+        def model_dump(self, *, mode="python"):
+            assert mode == "python"
+            return _draft("item_lookup", target_mentions=["전략성"])
+
+    result = normalize_registry_query(
+        raw_query="전략성은 뭐야?",
+        draft=GatewayDraftDouble(),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None and result.plan.target_ids == ["w-middle-0-0"]
+
+
+def test_public_normalizer_contract_is_exported_via_all() -> None:
+    assert {
+        "NormalizationIssueCode",
+        "NormalizationOption",
+        "NormalizationOutcome",
+        "RegistryDraftProtocol",
+        "RegistryNormalizationIssue",
+        "RegistryNormalizationResult",
+        "SemanticCandidateRequest",
+        "UnregisteredTargetResult",
+        "normalize_registry_query",
+    } <= set(competency_query.__all__)
+
+
+def test_raw_exact_target_cannot_be_replaced_by_draft_field_stopword() -> None:
+    result = normalize_registry_query(
+        raw_query="전략성의 정의를 알려줘",
+        draft=_draft("item_lookup", target_mentions=["정의"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None and result.plan.target_ids == ["w-middle-0-0"]
+
+
+def test_korean_can_expression_does_not_turn_semantic_search_into_count_query() -> None:
+    result = normalize_registry_query(
+        raw_query="맡은 일을 끝까지 할 수 있는 역량을 찾아줘",
+        draft=_draft(
+            "semantic_search",
+            semantic_description="맡은 일을 끝까지 하는 행동",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+    assert result.semantic_request is not None
+
+
+def test_raw_unknown_instrument_does_not_depend_on_gateway_constraint() -> None:
+    result = normalize_registry_query(
+        raw_query="성격검사의 역량 목록을 보여줘",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.UNKNOWN_INSTRUMENT
+
+
+def test_wrong_gateway_constraint_kind_cannot_reinterpret_raw_tier_or_field() -> None:
+    tier = normalize_registry_query(
+        raw_query="중위요인 좀 목록으로 보여줘",
+        draft=_draft(
+            "catalog_query",
+            constraint_mentions=[{"kind": "instrument", "text": "중위요인"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+    field = normalize_registry_query(
+        raw_query="전략성의 정의를 알려줘",
+        draft=_draft(
+            "item_lookup",
+            target_mentions=["전략성"],
+            constraint_mentions=[{"kind": "node_type", "text": "정의"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert tier.plan is not None and tier.plan.hierarchy_tiers == [HierarchyTier.MIDDLE]
+    assert tier.plan.instrument_ids == ["written_competency"]
+    assert field.plan is not None and field.plan.node_types == []
+    assert field.plan.target_ids == ["w-middle-0-0"]
+
+
+def test_raw_scope_conflict_is_typed_instead_of_first_match_wins() -> None:
+    result = normalize_registry_query(
+        raw_query="그중 전체 역량 목록을 보여줘",
+        draft=_draft("catalog_query", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0"],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None and result.issue.code == NormalizationIssueCode.AMBIGUOUS_SCOPE
+
+
+def test_explicit_target_cannot_escape_previous_result_scope() -> None:
+    result = normalize_registry_query(
+        raw_query="이전 결과에서 실행성만 보여줘",
+        draft=_draft("item_lookup", target_mentions=["실행성"], reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0"],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert "실행성" in result.issue.question
+
+
+def test_target_plus_unagreed_official_tier_is_not_silently_broadened() -> None:
+    result = normalize_registry_query(
+        raw_query="전략성의 중위요인 목록을 보여줘",
+        draft=_draft("catalog_query", target_mentions=["전략성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None and result.issue.code == NormalizationIssueCode.AMBIGUOUS_RELATION
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "instrument_id"),
+    [
+        ("필기 역량 목록", "written_competency"),
+        ("영상 역량 목록", "video_interview"),
+    ],
+)
+def test_raw_legacy_instrument_aliases_are_authoritative_without_draft_constraint(raw_query, instrument_id) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.plan is not None and result.plan.instrument_ids == [instrument_id]
+
+
+def test_draft_reuse_flag_alone_cannot_silently_narrow_scope() -> None:
+    result = normalize_registry_query(
+        raw_query="역량 목록 좀 알려줄래",
+        draft=_draft("catalog_query", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.scope == QueryScope.ALL
+    assert result.plan.previous_result_ids == []
+
+
+def test_raw_video_factor_and_analysis_filter_survive_missing_or_partial_draft() -> None:
+    video = normalize_registry_query(
+        raw_query="영상면접의 요인들을 보여줄래",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+    analysis = normalize_registry_query(
+        raw_query="분석에 포함된 항목 목록",
+        draft=_draft(
+            "catalog_query",
+            constraint_mentions=[{"kind": "filter", "text": "분석에 포함"}],
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert video.plan is not None
+    assert video.plan.instrument_ids == ["video_interview"]
+    assert video.plan.node_types == ["factor"]
+    assert analysis.plan is not None and analysis.plan.filters.analysis_included is True
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    [
+        "전략성 말고 실행성의 정의를 알려줘",
+        "필기 말고 영상 역량 목록",
+        "영상면접 제외하고 필기 역량 개수",
+    ],
+)
+def test_explicit_target_or_instrument_negation_requires_typed_clarification(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("item_lookup" if "정의" in raw_query else "catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert result.issue.options
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    ["제외할 영상면접의 항목 목록", "전략성이 아닌 실행성의 정의를 알려줘"],
+)
+def test_preposed_or_copular_negation_is_not_silently_dropped(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("item_lookup" if "정의" in raw_query else "catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+
+
+def test_analysis_exclusion_with_instrument_and_plain_instrument_union_are_not_negation_conflicts() -> None:
+    filtered = normalize_registry_query(
+        raw_query="영상면접의 분석에서 제외된 항목 목록",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+    union = normalize_registry_query(
+        raw_query="필기와 영상 역량 목록",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert filtered.plan is not None
+    assert filtered.plan.instrument_ids == ["video_interview"]
+    assert filtered.plan.filters.analysis_included is False
+    assert union.plan is not None
+    assert union.plan.instrument_ids == ["written_competency", "video_interview"]
+
+
+@pytest.mark.parametrize("raw_query", ["루트 항목 제외하고 목록", "말단 항목 말고 전체 목록"])
+def test_unsupported_filter_negation_requires_typed_clarification(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    [
+        "분석에서 제외된 항목 목록",
+        "분석에 포함되지 않은 항목 목록",
+        "분석에 안 들어가는 항목 목록",
+        "분석에 들어가지 않는 항목 목록",
+        "분석 대상이 아닌 항목 목록",
+        "분석에 사용 안 된 항목 목록",
+    ],
+)
+def test_explicit_analysis_exclusion_is_a_false_filter(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.plan is not None
+    assert result.plan.filters.analysis_included is False
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "relation"),
+    [
+        ("그중 부모를 알려줘", RelationType.PARENT),
+        ("그중 직접 하위요인", RelationType.CHILDREN),
+        ("그중 모든 하위요인", RelationType.DESCENDANTS),
+    ],
+)
+def test_previous_result_relation_follow_up_uses_revalidated_active_ids(raw_query, relation) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("relation_query", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "retired-id"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.scope == QueryScope.PREVIOUS_RESULT
+    assert result.plan.target_ids == ["w-middle-0-0"]
+    assert result.plan.relation == relation
+
+
+def test_previous_relation_raw_scope_beats_draft_field_as_target() -> None:
+    result = normalize_registry_query(
+        raw_query="그중 부모를 알려줘",
+        draft=_draft("relation_query", target_mentions=["부모"], reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.target_ids == ["w-middle-0-0"]
+    assert result.plan.relation == RelationType.PARENT
+
+
+@pytest.mark.parametrize("pronoun", ["그 역량", "해당 역량"])
+def test_previous_relation_pronoun_beats_wrong_draft_kind(pronoun: str) -> None:
+    result = normalize_registry_query(
+        raw_query=f"{pronoun}의 하위요인도 알려줘",
+        draft=_draft(
+            "item_lookup",
+            constraint_mentions=[{"kind": "field", "text": "하위요인"}],
+            reuse_previous_result=True,
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "retired-id"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.scope == QueryScope.PREVIOUS_RESULT
+    assert result.plan.target_ids == ["w-middle-0-0"]
+    assert result.plan.relation == RelationType.CHILDREN
+
+
+@pytest.mark.parametrize(
+    "pronoun",
+    ["그 역량", "해당 역량", "이 역량", "방금 본 역량", "앞서 나온 역량", "그것"],
+)
+def test_singular_previous_pronouns_reuse_one_active_stable_id(pronoun: str) -> None:
+    result = normalize_registry_query(
+        raw_query=f"{pronoun}의 정의를 알려줘",
+        draft=_draft("item_lookup", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "retired-id"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.scope == QueryScope.PREVIOUS_RESULT
+    assert result.plan.target_ids == ["w-middle-0-0"]
+
+
+def test_singular_previous_pronoun_with_multiple_active_items_is_ambiguous_target() -> None:
+    result = normalize_registry_query(
+        raw_query="해당 역량의 정의를 알려줘",
+        draft=_draft("item_lookup", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "w-middle-0-1"],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.AMBIGUOUS_TARGET
+    assert {option.label for option in result.issue.options} == {"전략성", "실행성"}
+    assert "w-middle" not in result.issue.model_dump_json()
+
+
+@pytest.mark.parametrize("pronoun", ["그 역량들", "해당 역량들", "그것들"])
+def test_plural_previous_pronouns_keep_all_active_items(pronoun: str) -> None:
+    result = normalize_registry_query(
+        raw_query=f"{pronoun}의 정의를 알려줘",
+        draft=_draft("item_lookup", reuse_previous_result=True),
+        snapshot=_snapshot(),
+        previous_result_ids=["w-middle-0-0", "w-middle-0-1"],
+    )
+
+    assert result.plan is not None
+    assert result.plan.target_ids == ["w-middle-0-0", "w-middle-0-1"]
+    assert result.plan.scope == QueryScope.PREVIOUS_RESULT
+
+
+def test_tier_fast_path_rejects_additional_tiers_negation_and_instrument_constraints() -> None:
+    snapshot = _snapshot()
+    two_tiers = normalize_registry_query(
+        raw_query="상위요인과 하위요인은 총 몇 개야?",
+        draft=_draft("aggregate_query"),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+    three_tiers = normalize_registry_query(
+        raw_query="상위요인, 중위요인, 하위요인의 총 개수",
+        draft=_draft("aggregate_query"),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+    negated = normalize_registry_query(
+        raw_query="하위요인 말고 최하위요인은 몇 개야?",
+        draft=_draft("aggregate_query"),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+    wrong_instrument = normalize_registry_query(
+        raw_query="상위요인은 영상면접에서 총 몇 개야?",
+        draft=_draft("aggregate_query"),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+
+    assert two_tiers.plan is not None
+    assert two_tiers.plan.hierarchy_tiers == [HierarchyTier.UPPER, HierarchyTier.LOWER]
+    assert three_tiers.plan is not None
+    assert three_tiers.plan.hierarchy_tiers == [
+        HierarchyTier.UPPER,
+        HierarchyTier.MIDDLE,
+        HierarchyTier.LOWER,
+    ]
+    assert negated.issue is not None
+    assert negated.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+    assert wrong_instrument.issue is not None
+    assert wrong_instrument.issue.code == NormalizationIssueCode.CONFLICTING_CONSTRAINTS
+
+
+def test_coordinated_known_targets_and_mixed_unknown_target_preserve_all_explicit_names() -> None:
+    known = normalize_registry_query(
+        raw_query="전략성과 실행성의 정의를 알려줘",
+        draft=_draft("item_lookup", target_mentions=["전략성", "실행성"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+    mixed = normalize_registry_query(
+        raw_query="전략성, 정의감의 정의",
+        draft=_draft("item_lookup", target_mentions=["전략성", "정의감"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert known.plan is not None
+    assert known.plan.target_ids == ["w-middle-0-0", "w-middle-0-1"]
+    assert mixed.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert mixed.unregistered_target is not None
+    assert mixed.unregistered_target.target_mentions == ["정의감"]
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    [
+        "현재 필기검사의 역량 목록",
+        "이 필기검사에서 역량 목록",
+        "우리 영상면접의 요인 목록",
+        "각 검사에서 역량 수",
+    ],
+)
+def test_instrument_determiners_and_generic_each_are_not_unknown(raw_query) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("aggregate_query" if " 수" in raw_query else "catalog_query"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.issue is None or result.issue.code != NormalizationIssueCode.UNKNOWN_INSTRUMENT
+    if raw_query == "각 검사에서 역량 수":
+        assert result.plan is not None and result.plan.group_by == GroupBy.INSTRUMENT
+
+
+def test_dynamic_active_instrument_label_is_resolved_without_gateway_constraint() -> None:
+    def mutate(items):
+        for item in items:
+            if item["instrument"] == "video_interview":
+                item["instrument"] = "practical_assessment"
+                item["instrument_label"] = "실기 평가"
+
+    result = normalize_registry_query(
+        raw_query="실기 평가 항목 목록",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(mutate=mutate),
+        previous_result_ids=[],
+    )
+
+    assert result.plan is not None
+    assert result.plan.instrument_ids == ["practical_assessment"]
+
+
+def test_invalid_hierarchy_profile_preserves_concrete_public_validation_reason() -> None:
+    def mutate(items):
+        next(item for item in items if item["name"] == "성과 예측")["level"] = "unexpected_level"
+
+    result = normalize_registry_query(
+        raw_query="상위요인 목록을 보여줘",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(mutate=mutate),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.UNSUPPORTED_REGISTRY_COMBINATION
+    assert "상위요인 구성" in result.issue.question
+    assert "일치하지 않습니다" in result.issue.question
+    assert WRITTEN_PROFILE_ID not in result.issue.question
+
+
+def test_normalized_dynamic_instrument_collision_requires_scope_clarification() -> None:
+    def mutate(items):
+        for item in items:
+            if item["instrument"] != "video_interview":
+                continue
+            if item["path"][1] == "표현능력":
+                item["instrument"] = "practical-a"
+                item["instrument_label"] = "실기-평가"
+            else:
+                item["instrument"] = "practical-b"
+                item["instrument_label"] = "실기 평가"
+
+    result = normalize_registry_query(
+        raw_query="실기 평가 항목 목록",
+        draft=_draft("catalog_query"),
+        snapshot=_snapshot(mutate=mutate),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.AMBIGUOUS_SCOPE
+    assert {option.label for option in result.issue.options} == {"실기-평가", "실기 평가"}
+    assert "practical-a" not in result.issue.model_dump_json()
+    assert "practical-b" not in result.issue.model_dump_json()
 
 
 def test_newline_separated_exact_names_remain_a_fast_path() -> None:

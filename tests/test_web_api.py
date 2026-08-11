@@ -18,7 +18,6 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import competency_interpreter as interpreter
 import web_api
-from competency_query import ItemField, QueryIntent
 from competency_registry import RegistrySnapshot, build_registry_snapshot
 from llm_gateway import FIXED_FAILURE_MESSAGE
 from web_api import app
@@ -35,7 +34,6 @@ class GatewayStub:
         messages: list[tuple[str, str]],
     ) -> dict:
         self.calls.append("gateway")
-        system_prompt = messages[0][1]
         query = messages[-1][1]
 
         if query in {
@@ -45,56 +43,69 @@ class GatewayStub:
         }:
             name = "공감성" if "공감성" in query else "성실성"
             return self._registry_decision(
-                {
-                    "intent": QueryIntent.ITEM_LOOKUP.value,
-                    "target_names": [name],
-                    "fields": [ItemField.DEFINITION.value],
-                }
+                intent_hint="item_lookup",
+                target_mentions=[name],
+                constraint_mentions=[{"kind": "field", "text": "정의"}],
             )
 
         if query == "그 역량의 하위요인도 알려줘.":
-            if '"previous_results": [{"id": "conscientiousness"' in system_prompt:
-                return self._registry_decision(
-                    {
-                        "intent": QueryIntent.ITEM_LOOKUP.value,
-                        "target_names": ["성실성"],
-                        "fields": [ItemField.CHILDREN.value],
-                    }
-                )
-
-            return {
-                "route": "needs_clarification",
-                "clarification_type": "registry",
-            }
+            return self._registry_decision(
+                intent_hint="item_lookup",
+                constraint_mentions=[{"kind": "field", "text": "하위요인"}],
+                reuse_previous_result=True,
+            )
 
         if query == "맡은 일을 꼼꼼하게 수행하는 역량은 뭐야?":
             return self._registry_decision(
-                {
-                    "intent": QueryIntent.SEMANTIC_SEARCH.value,
-                    "fields": [ItemField.DEFINITION.value],
-                    "semantic_query": "맡은 일을 꼼꼼하게 수행하는 역량",
-                }
+                intent_hint="semantic_search",
+                constraint_mentions=[{"kind": "field", "text": "정의"}],
+                semantic_description="맡은 일을 꼼꼼하게 수행하는 행동",
             )
 
         if query == "안녕하세요":
             return {
-                "route": "general_conversation",
-                "conversation_type": "greeting",
+                "route": "meta_conversation",
+                "kind": "greeting",
+            }
+
+        if query == "서울 날씨 알려줘":
+            return {
+                "route": "out_of_scope",
+                "topic": {
+                    "category": "weather",
+                    "summary": "서울 날씨",
+                },
             }
 
         return {
-            "route": "needs_clarification",
-            "clarification_type": "general",
+            "route": "out_of_scope",
+            "topic": {
+                "category": "other",
+                "summary": "지원 범위 밖 질문",
+            },
         }
 
     @staticmethod
-    def _registry_decision(query: dict) -> dict:
+    def _registry_decision(
+        *,
+        intent_hint: str,
+        target_mentions: list[str] | None = None,
+        constraint_mentions: list[dict[str, str]] | None = None,
+        semantic_description: str | None = None,
+        reuse_previous_result: bool = False,
+    ) -> dict:
         return {
             "route": "registry_query",
-            "query": query,
-            "answer_mode": "registry_facts",
-            "acknowledge_greeting": False,
-            "unsupported_remainder": None,
+            "draft": {
+                "intent_hint": intent_hint,
+                "target_mentions": target_mentions or [],
+                "constraint_mentions": constraint_mentions or [],
+                "semantic_description": semantic_description,
+                "reuse_previous_result": reuse_previous_result,
+                "answer_mode": "registry_facts",
+                "acknowledge_greeting": False,
+                "out_of_scope_remainder": None,
+            },
         }
 
 
@@ -136,20 +147,37 @@ class RegistryWriterStub:
         yield AIMessageChunk(content=answer[midpoint:])
 
 
-class GeneralWriterStub:
-    """일반 route를 실제 streaming writer 형태로 응답한다."""
+class ScopeWriterStub:
+    """Scope Writer의 strict 구조화 응답을 실제 호출 형태로 반환한다."""
 
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+        self.force_invalid = False
+        self.inputs: list[list[tuple[str, str]]] = []
 
-    async def astream(self, messages: list[tuple[str, str]]):
-        self.calls.append("general_writer")
+    async def ainvoke(self, messages: list[tuple[str, str]]) -> dict[str, str]:
+        self.calls.append("scope_writer")
+        self.inputs.append(messages)
         human_prompt = messages[-1][1]
-        if "응답 목적: 짧은 인사" in human_prompt:
-            answer = "안녕하세요! 궁금한 역량의 정의나 하위요인을 물어보세요."
-        else:
-            answer = "질문을 조금 더 구체적으로 알려 주세요. 역량에 관해 궁금한 점도 물어보실 수 있어요."
-        yield AIMessageChunk(content=answer)
+        if self.force_invalid:
+            return {
+                "acknowledgement": "서울은 맑고 기온은 28도입니다",
+                "scope_boundary": "이 챗봇은 등록된 역량 정보만 다룹니다",
+                "registry_redirect": "대신 등록 역량의 정의를 물어보세요",
+            }
+        if "mode: greeting" in human_prompt:
+            return {
+                "response": "안녕하세요, 반갑습니다",
+                "registry_redirect": "등록된 역량의 정의나 위계를 물어보세요",
+            }
+        return {
+            "acknowledgement": "서울 날씨 요청을 확인하고 싶으시군요",
+            "scope_boundary": (
+                "이 챗봇은 등록된 역량 정보만 다루므로 날씨를 직접 "
+                "확인하지 않습니다"
+            ),
+            "registry_redirect": "대신 등록 역량의 정의나 위계를 물어보세요",
+        }
 
 
 def make_synthetic_registry() -> RegistrySnapshot:
@@ -250,6 +278,10 @@ def client(
     test_database_path = tmp_path / "test_checkpoints.sqlite"
     registry_snapshot = make_synthetic_registry()
     model_calls: list[str] = []
+    gateway_stub = GatewayStub(model_calls)
+    semantic_selector_stub = SemanticSelectorStub(model_calls)
+    registry_writer_stub = RegistryWriterStub(model_calls)
+    scope_writer_stub = ScopeWriterStub(model_calls)
 
     def open_test_checkpointer(
         runtime_stack: ExitStack,
@@ -279,28 +311,29 @@ def client(
     monkeypatch.setattr(
         interpreter,
         "_gateway_for",
-        lambda _: GatewayStub(model_calls),
+        lambda _: gateway_stub,
     )
     monkeypatch.setattr(
         interpreter,
         "_semantic_selector_for",
-        lambda _: SemanticSelectorStub(model_calls),
+        lambda _: semantic_selector_stub,
     )
     monkeypatch.setattr(
         interpreter,
         "_registry_writer_for",
-        lambda _: RegistryWriterStub(model_calls),
+        lambda _: registry_writer_stub,
     )
     monkeypatch.setattr(
         interpreter,
-        "_general_writer_for",
-        lambda _: GeneralWriterStub(model_calls),
+        "_scope_writer_for",
+        lambda _, __: scope_writer_stub,
     )
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")
 
     with TestClient(app) as test_client:
         test_client.model_calls = model_calls  # type: ignore[attr-defined]
+        test_client.scope_writer = scope_writer_stub  # type: ignore[attr-defined]
         yield test_client
 
     interpreter.close_competency_runtime()
@@ -828,7 +861,7 @@ def test_semantic_request_uses_gateway_selector_and_writer_within_three_calls(
     assert state["llm_call_count"] == 3
 
 
-def test_general_request_is_gateway_first_and_uses_general_writer(
+def test_meta_request_is_gateway_first_and_uses_buffered_scope_writer(
     client: TestClient,
 ) -> None:
     thread_id = create_thread(client)
@@ -843,18 +876,163 @@ def test_general_request_is_gateway_first_and_uses_general_writer(
 
     assert response.status_code == 200
     assert events[-1][0] == "done"
-    assert "".join(
+    assert [
         payload["text"]
         for event, payload in events
         if event == "delta"
-    ) == done["answer"]
+    ] == [done["answer"]]
     assert done["answer"].startswith("안녕하세요")
+    assert done["candidates"] == []
     assert client.model_calls == [  # type: ignore[attr-defined]
         "gateway",
-        "general_writer",
+        "scope_writer",
     ]
     assert state["llm_call_count"] == 2
+    assert state["response_mode"] == "llm"
     assert state["messages"][-1].content == done["answer"]
+
+
+def test_scope_primary_sse_matches_non_stream_and_checkpoint_history(
+    client: TestClient,
+) -> None:
+    expected = (
+        "서울 날씨 요청을 확인하고 싶으시군요. "
+        "이 챗봇은 등록된 역량 정보만 다루므로 날씨를 직접 확인하지 않습니다. "
+        "대신 등록 역량의 정의나 위계를 물어보세요."
+    )
+    stream_thread_id = create_thread(client)
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"message": "서울 날씨 알려줘", "thread_id": stream_thread_id},
+    )
+    events = parse_sse_events(response.text)
+    event_names = [event for event, _ in events]
+    done = events[-1][1]
+    deltas = [payload["text"] for event, payload in events if event == "delta"]
+    state = interpreter.get_competency_state(stream_thread_id)
+    history = client.get(f"/api/threads/{stream_thread_id}/messages").json()
+
+    assert response.status_code == 200
+    assert event_names[0] == "start"
+    assert event_names[-1] == "done"
+    assert "error" not in event_names
+    assert deltas == [expected]
+    assert done == {
+        "thread_id": stream_thread_id,
+        "answer": expected,
+        "candidates": [],
+    }
+    assert state["response_mode"] == "llm"
+    assert state["scope_writer_attempts"] == 1
+    assert state["messages"][-1].content == expected
+    assert history["messages"][-1]["content"] == expected
+    assert history["candidates"] == []
+    assert client.model_calls == [  # type: ignore[attr-defined]
+        "gateway",
+        "scope_writer",
+    ]
+
+    non_stream_thread_id = create_thread(client)
+    non_stream = client.post(
+        "/api/chat",
+        json={"message": "서울 날씨 알려줘", "thread_id": non_stream_thread_id},
+    ).json()
+    non_stream_history = client.get(
+        f"/api/threads/{non_stream_thread_id}/messages"
+    ).json()
+
+    assert non_stream["answer"] == done["answer"]
+    assert non_stream["candidates"] == []
+    assert non_stream_history["messages"][-1]["content"] == done["answer"]
+
+
+def test_scope_fallback_sse_is_safe_and_byte_identical_across_api_surfaces(
+    client: TestClient,
+) -> None:
+    scope_writer: ScopeWriterStub = client.scope_writer  # type: ignore[attr-defined]
+    scope_writer.force_invalid = True
+    expected = (
+        "서울 날씨에 관해 궁금하신 점을 이해했습니다. "
+        "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 답하거나 "
+        "판단하지 않습니다. "
+        "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 후보를 "
+        "찾아볼 수 있습니다."
+    )
+    stream_thread_id = create_thread(client)
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"message": "서울 날씨 알려줘", "thread_id": stream_thread_id},
+    )
+    events = parse_sse_events(response.text)
+    event_names = [event for event, _ in events]
+    done = events[-1][1]
+    deltas = [payload["text"] for event, payload in events if event == "delta"]
+    state = interpreter.get_competency_state(stream_thread_id)
+    history = client.get(f"/api/threads/{stream_thread_id}/messages").json()
+
+    assert response.status_code == 200
+    assert event_names[0] == "start"
+    assert event_names[-1] == "done"
+    assert "error" not in event_names
+    assert deltas == [expected]
+    assert done["answer"] == expected
+    assert done["candidates"] == []
+    public_answer_text = "\n".join([*deltas, done["answer"]])
+    assert "맑" not in public_answer_text
+    assert "28도" not in public_answer_text
+    assert state["response_mode"] == "scope_fallback"
+    assert state["scope_writer_failed"] is True
+    assert state["scope_writer_attempts"] == 2
+    assert state["llm_call_count"] == 3
+    assert state["messages"][-1].content == expected
+    assert history["messages"][-1]["content"] == expected
+    assert history["candidates"] == []
+    assert client.model_calls == [  # type: ignore[attr-defined]
+        "gateway",
+        "scope_writer",
+        "scope_writer",
+    ]
+
+    non_stream_thread_id = create_thread(client)
+    non_stream = client.post(
+        "/api/chat",
+        json={"message": "서울 날씨 알려줘", "thread_id": non_stream_thread_id},
+    ).json()
+    non_stream_history = client.get(
+        f"/api/threads/{non_stream_thread_id}/messages"
+    ).json()
+
+    assert non_stream["answer"] == done["answer"]
+    assert non_stream["candidates"] == []
+    assert non_stream_history["messages"][-1]["content"] == done["answer"]
+
+
+def test_scope_delta_is_published_only_after_checkpoint_commit(
+    client: TestClient,
+) -> None:
+    thread_id = create_thread(client)
+
+    async def collect_and_check_commit() -> list[dict]:
+        events: list[dict] = []
+        async for event in interpreter.run_competency_stream(
+            "서울 날씨 알려줘",
+            thread_id,
+        ):
+            if event.get("type") == "delta":
+                committed = interpreter.get_competency_state(thread_id)
+                assert committed["messages"][-1].content == event["text"]
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_and_check_commit())
+
+    assert [event["type"] for event in events][-1] == "done"
+    assert [event for event in events if event["type"] == "error"] == []
+    assert [event["text"] for event in events if event["type"] == "delta"] == [
+        events[-1]["answer"]
+    ]
 
 
 def test_natural_language_query_and_conversation_restore(

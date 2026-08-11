@@ -29,10 +29,8 @@ from pydantic import (
     StrictInt,
     StrictStr,
     TypeAdapter,
+    field_validator,
 )
-
-from competency_query import ParsedRegistryQuery, QueryIntent
-
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 ENTRY_MODEL_ENV = "OPENAI_ENTRY_MODEL"
@@ -48,76 +46,131 @@ class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
-# ``help`` and ``out_of_scope`` deliberately do not belong to this type.  The
-# gateway has dedicated routes for those cases, while all seven deterministic
-# registry query intents remain available here.
-RegistryGatewayIntent = Literal[
-    QueryIntent.ITEM_LOOKUP,
-    QueryIntent.SEMANTIC_SEARCH,
-    QueryIntent.CATALOG_QUERY,
-    QueryIntent.HIERARCHY_QUERY,
-    QueryIntent.RELATION_QUERY,
-    QueryIntent.AGGREGATE_QUERY,
-    QueryIntent.COMPARISON_QUERY,
+RegistryIntentHint = Literal[
+    "item_lookup",
+    "semantic_search",
+    "catalog_query",
+    "hierarchy_query",
+    "relation_query",
+    "aggregate_query",
+    "comparison_query",
 ]
 RegistryAnswerMode = Literal["registry_facts", "registry_facts_with_general_guidance"]
-GeneralConversationKind = Literal[
+ConstraintKind = Literal[
+    "instrument",
+    "node_type",
+    "hierarchy_tier",
+    "relation",
+    "field",
+    "scope",
+    "filter",
+    "group_by",
+]
+ScopeTopicCategory = Literal[
+    "date_time",
+    "weather",
+    "news_current_events",
+    "professional_advice",
+    "personal_assessment",
+    "employment_decision",
+    "general_knowledge",
+    "external_action",
+    "unsafe",
+    "other",
+]
+MetaConversationKind = Literal[
     "greeting",
-    "small_talk",
+    "thanks",
+    "farewell",
     "bot_identity",
-    "simple_concept",
+    "capability_help",
 ]
-UnsupportedKind = Literal[
-    "current_information",
-    "sensitive_advice",
-    "unsafe_or_other_unsupported",
-]
-ClarificationKind = Literal["registry", "general"]
 
 
-class GatewayRegistryQuery(ParsedRegistryQuery):
-    """Registry query accepted specifically from the gateway.
+class ConstraintMention(_StrictFrozenModel):
+    """An untrusted constraint phrase copied from the user's wording."""
 
-    Narrowing ``intent`` makes the JSON schema itself exclude the legacy help
-    and out-of-scope intents instead of relying on a later Python branch.
+    kind: ConstraintKind
+    text: StrictStr
+
+
+class ScopeTopic(_StrictFrozenModel):
+    """A non-registry topic label, never an answer to the user's question."""
+
+    category: ScopeTopicCategory
+    summary: StrictStr = Field(min_length=1, max_length=160)
+
+    @field_validator("summary")
+    @classmethod
+    def _reject_blank_summary(cls, value: StrictStr) -> StrictStr:
+        if not value.strip():
+            raise ValueError("scope topic summary must not be blank")
+        return value
+
+
+class _StrictNonBlankResponseModel(_StrictFrozenModel):
+    """Strict structured-output base whose public prose fields cannot be blank."""
+
+    @field_validator("*", check_fields=False)
+    @classmethod
+    def _reject_blank_text(cls, value: StrictStr) -> StrictStr:
+        if not value.strip():
+            raise ValueError("response text must not be blank")
+        return value
+
+
+class OutOfScopeResponseDraft(_StrictNonBlankResponseModel):
+    """Buffered Scope Writer output for a substantive non-registry request."""
+
+    acknowledgement: StrictStr
+    scope_boundary: StrictStr
+    registry_redirect: StrictStr
+
+
+class MetaResponseDraft(_StrictNonBlankResponseModel):
+    """Buffered Scope Writer output for a supported social or help turn."""
+
+    response: StrictStr
+    registry_redirect: StrictStr
+
+
+class RegistryQueryDraft(_StrictFrozenModel):
+    """Small, non-authoritative interpretation produced by the entry model.
+
+    Canonical names, stable IDs, exact hierarchy enums, and final filters are
+    deliberately absent.  The deterministic query normalizer owns those
+    decisions after checking the raw query and active registry snapshot.
     """
 
-    intent: RegistryGatewayIntent
-
-
-class RegistryQueryDecision(_StrictFrozenModel):
-    route: Literal["registry_query"]
-    query: GatewayRegistryQuery
+    intent_hint: RegistryIntentHint
+    target_mentions: list[StrictStr]
+    constraint_mentions: list[ConstraintMention]
+    semantic_description: StrictStr | None
+    reuse_previous_result: StrictBool
     answer_mode: RegistryAnswerMode
     acknowledge_greeting: StrictBool
-    unsupported_remainder: UnsupportedKind | None
+    out_of_scope_remainder: ScopeTopic | None
 
 
-class GeneralConversationDecision(_StrictFrozenModel):
-    route: Literal["general_conversation"]
-    conversation_type: GeneralConversationKind
+class RegistryRouteDecision(_StrictFrozenModel):
+    route: Literal["registry_query"]
+    draft: RegistryQueryDraft
 
 
-class CapabilityHelpDecision(_StrictFrozenModel):
-    route: Literal["capability_help"]
+class MetaRouteDecision(_StrictFrozenModel):
+    route: Literal["meta_conversation"]
+    kind: MetaConversationKind
 
 
-class UnsupportedDecision(_StrictFrozenModel):
-    route: Literal["unsupported"]
-    unsupported_type: UnsupportedKind
-
-
-class NeedsClarificationDecision(_StrictFrozenModel):
-    route: Literal["needs_clarification"]
-    clarification_type: ClarificationKind
+class OutOfScopeRouteDecision(_StrictFrozenModel):
+    route: Literal["out_of_scope"]
+    topic: ScopeTopic
 
 
 GatewayDecisionVariant = (
-    RegistryQueryDecision
-    | GeneralConversationDecision
-    | CapabilityHelpDecision
-    | UnsupportedDecision
-    | NeedsClarificationDecision
+    RegistryRouteDecision
+    | MetaRouteDecision
+    | OutOfScopeRouteDecision
 )
 _DISCRIMINATED_GATEWAY_DECISION = TypeAdapter(
     Annotated[GatewayDecisionVariant, Field(discriminator="route")]
@@ -129,8 +182,9 @@ class GatewayDecision(_StrictFrozenModel):
 
     OpenAI Structured Outputs requires the root schema to be an object.  The
     ordinary union therefore lives under ``decision`` instead of producing a
-    root-level ``anyOf``/``oneOf``.  Each variant's literal ``route`` remains the
-    strict discriminator when Pydantic validates the nested value.
+    root-level ``anyOf``/``oneOf``.  After the provider response is received,
+    :func:`validate_gateway_decision` revalidates the nested variant through a
+    route-discriminated adapter.
     """
 
     decision: GatewayDecisionVariant
@@ -196,14 +250,23 @@ CAPABILITY_MANIFEST = CapabilityManifest(
             description="등록 사실과 구분해 비개인화된 일반 활용 제안을 제공합니다.",
         ),
         CapabilitySpec(
-            key="general_conversation",
-            description="인사와 챗봇 소개, 시사성이 없는 간단한 일반 개념에 답합니다.",
+            key="meta_conversation",
+            description=(
+                "인사·감사·짧은 작별, 챗봇 소개와 지원 기능 사용법 안내를 제공합니다."
+            ),
         ),
     ),
     limitations=(
         CapabilitySpec(
             key="invented_registry_facts",
             description="레지스트리에 없는 역량 정의나 등록 사실을 만들지 않습니다.",
+        ),
+        CapabilitySpec(
+            key="non_registry_knowledge",
+            description=(
+                "모든 실질적인 비역량 지식 질문에는 내용을 직접 답하지 않고 "
+                "주제에 맞는 범위 안내와 역량 질문 전환을 제공합니다."
+            ),
         ),
         CapabilitySpec(
             key="personal_assessment",
@@ -389,6 +452,19 @@ def invoke_with_budget(
 ) -> Any:
     budget.claim()
     return model.invoke(input_value, **kwargs)
+
+
+async def ainvoke_with_budget(
+    model: Any,
+    input_value: Any,
+    *,
+    budget: LlmCallBudget,
+    **kwargs: Any,
+) -> Any:
+    """Await one model request after claiming its non-refundable budget slot."""
+
+    budget.claim()
+    return await model.ainvoke(input_value, **kwargs)
 
 
 async def astream_with_budget(
