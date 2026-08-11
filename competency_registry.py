@@ -70,6 +70,24 @@ class RegistryValidationError(ValueError):
     """Raised when a stored registry cannot safely be used at runtime."""
 
 
+def _derive_id_lookup(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Index items by stable ID for a snapshot built without an explicit map.
+
+    ``build_registry_snapshot`` already validates every item, so this path only
+    runs for directly constructed snapshots.  A missing ID is reported as a
+    registry error instead of surfacing as a bare ``KeyError`` from a
+    comprehension.
+    """
+
+    derived: dict[str, Mapping[str, Any]] = {}
+    for item in document.get("items", ()):
+        item_id = item.get("id") if isinstance(item, Mapping) else None
+        if not item_id:
+            raise RegistryValidationError("레지스트리 항목에 stable ID가 없습니다.")
+        derived[str(item_id)] = item
+    return derived
+
+
 @dataclass(frozen=True)
 class RegistrySnapshot:
     """One validated, active competency-registry version held in memory."""
@@ -92,10 +110,7 @@ class RegistrySnapshot:
         # A single memo is shared across every view.  Consequently an item
         # referenced by document, id_lookup, canonical_lookup, and an alias
         # remains the exact same frozen object rather than independent copies.
-        id_lookup = self.id_lookup or {
-            item["id"]: item
-            for item in self.document.get("items", ())
-        }
+        id_lookup = self.id_lookup or _derive_id_lookup(self.document)
         memo: dict[int, object] = {}
         object.__setattr__(
             self,

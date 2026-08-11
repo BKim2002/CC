@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-08-11
 **Deciders:** Seokyoung Kim
-**관련:** [PR #5](https://github.com/BKim2002/CC/pull/5), `ONE_TIME_LLM_GATEWAY_DUAL_WRITER_PRD.md`, `ONE_TIME_REGISTRY_FIRST_INPUT_FLEXIBILITY_PRD.md`
+**관련:** [PR #5](https://github.com/BKim2002/CC/pull/5), [PRD#1](../prd/ONE_TIME_LLM_GATEWAY_DUAL_WRITER_PRD.md) (§9 fallback 금지 규칙을 supersede), [PRD#2](../prd/ONE_TIME_REGISTRY_FIRST_INPUT_FLEXIBILITY_PRD.md)
 
 ## Context
 
@@ -20,9 +20,9 @@
 
 | 출처 | 규칙 |
 |---|---|
-| PRD#1 `:316-318` | "render_grounded_fallback은 Writer prompt의 기준 답변이나 검증 보조로 사용할 수 있지만, **정상 사용자 응답을 Python이 대신 작성하는 공개 fallback으로 사용하지 않는다.** Writer가 최종적으로 실패하면 공통 고정 장애 안내문을 사용한다." |
-| PRD#2 `:568` | "**정상 primary 응답은 항상 생성형이며 fallback만 결정적이다.**" |
-| PRD#2 `:750` | Scope Writer는 "두 번 실패한 경우에도 fixed failure가 아닌 scope fallback으로 끝난다." |
+| PRD#1 §9 Registry Writer 계약 | "render_grounded_fallback은 Writer prompt의 기준 답변이나 검증 보조로 사용할 수 있지만, **정상 사용자 응답을 Python이 대신 작성하는 공개 fallback으로 사용하지 않는다.** Writer가 최종적으로 실패하면 공통 고정 장애 안내문을 사용한다." |
+| PRD#2 §13 Scope Writer 복구와 fallback | "**정상 primary 응답은 항상 생성형이며 fallback만 결정적이다.**" |
+| PRD#2 구현 범위 | Scope Writer는 "두 번 실패한 경우에도 fixed failure가 아닌 scope fallback으로 끝난다." |
 
 PRD#2가 Scope 경로에 도입한 "primary는 생성형, fallback은 결정적, fallback도 정상 종료"는 PRD#1의 절대 금지를 실질적으로 대체한 정책이다. 그러나 이 정책이 Scope 경로에만 적용되고 Registry 경로에는 적용되지 않아 **동일 시스템 안에 두 개의 실패 정책이 공존**한다.
 

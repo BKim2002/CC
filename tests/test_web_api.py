@@ -1254,3 +1254,22 @@ def test_internal_error_response_does_not_leak_details(
     assert "Traceback" not in response.text
     assert "password" not in response.text
     assert "secret-host" not in response.text
+
+
+def test_unhandled_public_event_name_is_ignored_rather_than_reported_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Growing the public contract must not silently turn a new event into a
+    # user-visible failure; only a real "error" event maps to the error frame.
+    monkeypatch.setattr(
+        web_api,
+        "_SSE_EVENT_NAMES",
+        web_api._SSE_EVENT_NAMES | {"progress"},
+    )
+
+    assert web_api._public_stream_event({"event": "progress"}, "thread") is None
+
+    event, payload = web_api._public_stream_event({"event": "error"}, "thread")
+
+    assert event == "error"
+    assert payload == web_api._GENERIC_STREAM_ERROR

@@ -2082,6 +2082,9 @@ _runtime_stack: ExitStack | None = None
 _runtime_active_users = 0
 _runtime_close_pending = False
 _thread_locks_guard = threading.Lock()
+# A same-thread burst should not spin at a fixed 100 Hz while a long turn runs.
+_THREAD_LOCK_MIN_DELAY = 0.01
+_THREAD_LOCK_MAX_DELAY = 0.1
 
 
 class _ThreadLockEntry:
@@ -2241,13 +2244,17 @@ async def _async_thread_execution(thread_id: str) -> AsyncIterator[None]:
         entry.users += 1
 
     acquired = False
+    delay = _THREAD_LOCK_MIN_DELAY
     try:
         while not acquired:
             # Non-blocking acquisition leaves no worker-thread call behind
-            # when this coroutine is cancelled while waiting.
+            # when this coroutine is cancelled while waiting.  The sync API
+            # shares this same ``threading.Lock``, so an ``asyncio.Lock`` would
+            # stop serialising /api/chat against /api/chat/stream.
             acquired = entry.lock.acquire(blocking=False)
             if not acquired:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _THREAD_LOCK_MAX_DELAY)
         yield
     finally:
         if acquired:

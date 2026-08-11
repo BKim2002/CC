@@ -313,6 +313,14 @@ Registry Writer의 생성 토큰은 사용자에게 바로 보내지 않는다.
 3. 검증 성공 후에만 delta 또는 replace로 최종 내용을 공개한다.
 4. checkpoint에는 검증된 AIMessage 하나만 기록한다.
 
+> **SUPERSEDED — [ADR-001](../adr/ADR-001-registry-writer-grounding-contract.md) (2026-08-11)**
+> 아래 단락의 fallback 금지 규칙은 더 이상 유효하지 않다. Registry Writer가
+> 검증을 통과하지 못하면 같은 grounding context로 렌더링한 답변을
+> `registry_fallback`으로 공개하며, 고정 장애 안내는 grounding context 구성
+> 실패처럼 결정적 복구조차 불가능한 경우에만 쓴다. 이는 이 문서의 후속 PRD가
+> Scope 경로에 도입한 "정상 primary는 생성형, fallback만 결정적" 정책을 Registry
+> 경로에도 적용한 것이다.
+
 기존 render_grounded_fallback은 Writer prompt의 기준 답변이나 검증 보조로
 사용할 수 있지만, 정상 사용자 응답을 Python이 대신 작성하는 공개 fallback으로
 사용하지 않는다. Writer가 최종적으로 실패하면 공통 고정 장애 안내문을 사용한다.

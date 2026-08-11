@@ -2158,7 +2158,7 @@ def normalize_registry_query(
         intent = QueryIntent.RELATION_QUERY
         rule_ids.append("explicit_relation_over_intent_hint")
 
-    target_names = [str(snapshot.id_lookup[item_id]["name"]) for item_id in target_ids]
+    # ``target_ids`` has not changed since ``target_names`` was resolved above.
     parsed = ParsedRegistryQuery(
         intent=intent,
         target_names=target_names,

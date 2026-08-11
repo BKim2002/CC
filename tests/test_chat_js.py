@@ -6,9 +6,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 def test_browser_sse_parser_handles_utf8_chunk_boundaries_and_safe_text() -> None:
     node = shutil.which("node")
-    assert node is not None, "브라우저 JavaScript 검증에는 Node.js가 필요합니다."
+
+    if node is None:
+        pytest.skip("브라우저 JavaScript 검증에는 Node.js가 필요합니다.")
 
     chat_js = Path(__file__).parents[1] / "static" / "chat.js"
     harness = r"""

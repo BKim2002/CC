@@ -367,8 +367,13 @@ def _public_stream_event(
             ),
         }
 
-    # Runtime의 예외 메시지나 내부 error code는 브라우저로 전달하지 않는다.
-    return "error", dict(_GENERIC_STREAM_ERROR)
+    if event == "error":
+        # Runtime의 예외 메시지나 내부 error code는 브라우저로 전달하지 않는다.
+        return "error", dict(_GENERIC_STREAM_ERROR)
+
+    # 공개 event 이름이 늘어나도 처리되지 않은 event가 조용히 오류로 바뀌지 않게
+    # 한다. 계약에 없는 event는 오류가 아니라 무시 대상이다.
+    return None
 
 
 async def _chat_event_stream(

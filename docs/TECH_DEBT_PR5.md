@@ -6,6 +6,8 @@
 
 우선순위 = (Impact + Risk) × (6 − Effort). 각 축 1~5.
 
+**진행 상황 (2026-08-11):** Phase 1 완료 (커밋 `c6b0a49`), Phase 2 완료. Phase 3는 머지 후 별도 PR로 남아 있다. 테스트 740 → 773.
+
 ---
 
 ## 1. 항목 목록과 점수
@@ -108,17 +110,17 @@ ADR-001의 정책 비대칭을 `main`에 들이지 않는 것이 목적. PR이 �
 
 **순서가 중요합니다.** D1을 D2·D3보다 먼저 넣으면 검증 완화 상태에서 안전망도 fallback도 없는 구간이 생깁니다.
 
-### Phase 2 — 머지 전, 저비용 동봉
+### Phase 2 — 머지 전, 저비용 동봉 ✅ 완료
 
 전부 Effort 1이고 의존관계가 없으므로 같은 PR에 묶는다.
 
-- **R6** fallthrough를 `if event == "error"`로 명시
-- **R7** `item.get("id")` 방어 + 누락 시 명시적 예외
-- **R3** 중복 `target_names` 제거
-- **R8** Node 부재 시 `pytest.skip`
-- **R9** `ONE_TIME_*_PRD.md` → `docs/prd/` 이동, PRD#1 `:316-318`에 supersede 표기
-- **R5a** 폴링 지수 백오프
-- **R10** PR 본문 갱신 (Scope Writer, 740 passed, ADR 링크)
+- [x] **R6** fallthrough를 `if event == "error"`로 좁히고 미처리 event는 `None` 반환
+- [x] **R7** `_derive_id_lookup` 분리, ID 누락 시 `RegistryValidationError`
+- [x] **R3** 중복 `target_names` 제거
+- [x] **R8** Node 부재 시 `pytest.skip`
+- [x] **R9** `ONE_TIME_*_PRD.md` → `docs/prd/` 이동, PRD#1 §9에 supersede 블록 추가
+- [x] **R5a** 폴링 지수 백오프 (10ms → 100ms 상한), sync/async 락 공유 이유를 주석으로 고정
+- [ ] **R10** PR 본문 갱신 — push 이후
 
 ### Phase 3 — 머지 후, 별도 PR
 
