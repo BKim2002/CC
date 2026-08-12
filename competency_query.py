@@ -154,7 +154,9 @@ class ParsedRegistryQuery(_StrictModel):
 
     intent: QueryIntent
     target_names: list[StrictStr] = Field(default_factory=list)
-    instrument_labels: list[StrictStr] = Field(default_factory=list)
+    # Accepts either a registered instrument label or its id; the validator
+    # resolves both, so the name says "reference" rather than "label".
+    instrument_refs: list[StrictStr] = Field(default_factory=list)
     node_types: list[StrictStr] = Field(default_factory=list)
     hierarchy_tiers: list[HierarchyTier] = Field(default_factory=list)
     relation: RelationType | None = None
@@ -639,7 +641,7 @@ def validate_parsed_query(
     except ValueError as exc:
         return PlanValidationResult(clarification="현재 검사 도구 구성을 확인할 수 없습니다.", errors=[str(exc)])
     instrument_ids: list[str] = []
-    for raw_label in parsed.instrument_labels:
+    for raw_label in parsed.instrument_refs:
         label = raw_label.strip()
         instrument_id = instruments_by_label.get(label) or (label if label in instruments_by_id else None)
         if instrument_id is None:
@@ -2374,7 +2376,7 @@ def normalize_registry_query(
     parsed = ParsedRegistryQuery(
         intent=intent,
         target_names=target_names,
-        instrument_labels=instrument_ids,
+        instrument_refs=instrument_ids,
         node_types=_unique(node_types),
         hierarchy_tiers=hierarchy_tiers,
         relation=relation,

@@ -478,7 +478,7 @@ def test_video_never_receives_written_tier_filter() -> None:
     snapshot = _snapshot()
     parsed = ParsedRegistryQuery(
         intent=QueryIntent.CATALOG_QUERY,
-        instrument_labels=["영상면접"],
+        instrument_refs=["영상면접"],
         hierarchy_tiers=[HierarchyTier.UPPER],
     )
     validated = validate_parsed_query(parsed, snapshot)
@@ -522,7 +522,7 @@ def test_parsed_query_canonicalizes_alias_and_deduplicates_stable_ids() -> None:
     "parsed, previous",
     [
         (ParsedRegistryQuery(intent=QueryIntent.ITEM_LOOKUP, target_names=["없는 이름"]), None),
-        (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, instrument_labels=["없는 검사"]), None),
+        (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, instrument_refs=["없는 검사"]), None),
         (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, node_types=["없는 레벨"]), None),
         (ParsedRegistryQuery(intent=QueryIntent.RELATION_QUERY, relation=RelationType.PARENT), None),
         (ParsedRegistryQuery(intent=QueryIntent.COMPARISON_QUERY, target_names=["전략성"]), None),
