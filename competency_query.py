@@ -1796,7 +1796,12 @@ def normalize_registry_query(
         else []
     )
     draft_mentions = [value for value in draft_mentions if value]
-    unknown_mentions: list[str] = list(raw_target_mentions)
+    # The two sources are kept apart because they carry different authority:
+    # a raw-query span is the user's own wording, while a draft mention is only
+    # a hint from the entry model.  Every use below still reads the union; the
+    # sources start behaving differently in a later step.
+    raw_unknown_mentions: list[str] = list(raw_target_mentions)
+    draft_unknown_mentions: list[str] = []
     for mention in draft_mentions:
         # A draft target is merely a span hint.  If its normalized text does
         # not occur in the raw query, treating it as a target would grant the
@@ -1826,13 +1831,19 @@ def normalize_registry_query(
             # Once an explicit registered raw span or previous-result scope
             # has been found, an unresolved draft mention cannot replace or
             # widen it. Gateway labels such as "정의" are only hints.
-            unknown_mentions.append(mention)
+            draft_unknown_mentions.append(mention)
     target_ids = _unique(target_ids)
-    unknown_mentions = _unique(
+    raw_unknown_mentions = _unique(
         mention
-        for mention in unknown_mentions
+        for mention in raw_unknown_mentions
         if not _resolve_target_mention(mention, owners)[0]
     )
+    draft_unknown_mentions = _unique(
+        mention
+        for mention in draft_unknown_mentions
+        if not _resolve_target_mention(mention, owners)[0]
+    )
+    unknown_mentions = _unique([*raw_unknown_mentions, *draft_unknown_mentions])
     target_names = [str(snapshot.id_lookup[item_id]["name"]) for item_id in target_ids]
     target_surfaces = [
         str(label)
