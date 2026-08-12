@@ -1796,12 +1796,14 @@ def normalize_registry_query(
         else []
     )
     draft_mentions = [value for value in draft_mentions if value]
-    # The two sources are kept apart because they carry different authority:
-    # a raw-query span is the user's own wording, while a draft mention is only
-    # a hint from the entry model.  Every use below still reads the union; the
-    # sources start behaving differently in a later step.
+    # Unresolved mentions are split by how strongly the user asserted them.
+    # A raw-query span and a draft mention the user clearly named as a target
+    # are declarations, and may still report an unregistered name.  A draft
+    # mention that only survived because nothing else was found is incidental:
+    # the entry model routinely copies scope nouns such as "역량 목록" there.
     raw_unknown_mentions: list[str] = list(raw_target_mentions)
-    draft_unknown_mentions: list[str] = []
+    draft_explicit_unknowns: list[str] = []
+    incidental_draft_mentions: list[str] = []
     for mention in draft_mentions:
         # A draft target is merely a span hint.  If its normalized text does
         # not occur in the raw query, treating it as a target would grant the
@@ -1821,29 +1823,27 @@ def normalize_registry_query(
             )
         if resolved_ids:
             target_ids.extend(resolved_ids)
-        elif not _is_registry_field_stopword(mention) and (
-            (
-                not target_ids
-                and not (raw_reuse and active_previous)
-            )
-            or _looks_like_explicit_unknown_target(mention, raw_query)
-        ):
+        elif not _is_registry_field_stopword(mention):
             # Once an explicit registered raw span or previous-result scope
             # has been found, an unresolved draft mention cannot replace or
             # widen it. Gateway labels such as "정의" are only hints.
-            draft_unknown_mentions.append(mention)
+            if _looks_like_explicit_unknown_target(mention, raw_query):
+                draft_explicit_unknowns.append(mention)
+            elif not target_ids and not (raw_reuse and active_previous):
+                incidental_draft_mentions.append(mention)
     target_ids = _unique(target_ids)
-    raw_unknown_mentions = _unique(
-        mention
-        for mention in raw_unknown_mentions
-        if not _resolve_target_mention(mention, owners)[0]
+
+    def _unresolved(mentions: Iterable[str]) -> list[str]:
+        return _unique(
+            mention
+            for mention in mentions
+            if not _resolve_target_mention(mention, owners)[0]
+        )
+
+    declared_unknown_mentions = _unresolved(
+        [*raw_unknown_mentions, *draft_explicit_unknowns]
     )
-    draft_unknown_mentions = _unique(
-        mention
-        for mention in draft_unknown_mentions
-        if not _resolve_target_mention(mention, owners)[0]
-    )
-    unknown_mentions = _unique([*raw_unknown_mentions, *draft_unknown_mentions])
+    incidental_draft_mentions = _unresolved(incidental_draft_mentions)
     target_names = [str(snapshot.id_lookup[item_id]["name"]) for item_id in target_ids]
     target_surfaces = [
         str(label)
@@ -1872,7 +1872,9 @@ def normalize_registry_query(
     raw_relation_values: list[RelationType] = []
     raw_relation_ambiguous = False
     related_tier = None
-    if target_ids or unknown_mentions or (raw_reuse and active_previous):
+    # A draft mention that may yet be dropped must not open relation detection;
+    # only a real target or the user's own unknown span does.
+    if target_ids or declared_unknown_mentions or (raw_reuse and active_previous):
         raw_relation_values, raw_relation_ambiguous = _relation_values(raw_query)
         related_tier = _related_tier_value(raw_query)
     if raw_relation_ambiguous and not raw_relation_values:
@@ -2087,7 +2089,10 @@ def normalize_registry_query(
     raw_intent = _intent_from_raw(
         raw_query,
         has_targets=bool(target_ids),
-        has_unknown_targets=bool(unknown_mentions),
+        # Only a raw-query unknown may force an item lookup.  A draft mention
+        # that is about to be dropped would otherwise turn a catalog question
+        # into a lookup for a name nobody asked about.
+        has_unknown_targets=bool(declared_unknown_mentions),
         has_relation=relation is not None or related_tier is not None,
     )
     if raw_intent is None and hierarchy_tiers:
@@ -2110,24 +2115,47 @@ def normalize_registry_query(
 
     semantic_description = _clean_public_mention(draft_data.get("semantic_description"))
     grounded_semantic_query = _grounded_semantic_query(raw_query, semantic_description)
-    if unknown_mentions:
+    if declared_unknown_mentions:
         # A described behaviour is a stronger signal than spelling proximity,
         # so the semantic route keeps precedence over any suggestion.
         if grounded_semantic_query is not None:
             return _result_with_semantic_request(
                 grounded_semantic_query,
-                unknown_mentions,
+                declared_unknown_mentions,
                 (*rule_ids, "unknown_target_semantic_request"),
             )
-        if raw_unknown_mentions:
-            near_names = _near_registered_names(raw_unknown_mentions[0], snapshot)
+        near_names = _near_registered_names(declared_unknown_mentions[0], snapshot)
+        if near_names:
+            return _result_with_near_match(
+                declared_unknown_mentions[0],
+                near_names,
+                (*rule_ids, "near_match_suggestion"),
+            )
+        return _result_with_unregistered(
+            declared_unknown_mentions,
+            (*rule_ids, "unregistered_target"),
+        )
+    if incidental_draft_mentions:
+        # An incidental mention never declares a name unregistered.  It is a
+        # hint that missed: offered as a correction when it is close to a
+        # registered name, dropped otherwise.  Promoting it to a rejection is
+        # what made "역량 목록 좀 알려줘" fail, because the entry model copies
+        # scope nouns into target_mentions.
+        if grounded_semantic_query is not None:
+            return _result_with_semantic_request(
+                grounded_semantic_query,
+                incidental_draft_mentions,
+                (*rule_ids, "unknown_target_semantic_request"),
+            )
+        for mention in incidental_draft_mentions:
+            near_names = _near_registered_names(mention, snapshot)
             if near_names:
                 return _result_with_near_match(
-                    raw_unknown_mentions[0],
+                    mention,
                     near_names,
                     (*rule_ids, "near_match_suggestion"),
                 )
-        return _result_with_unregistered(unknown_mentions, (*rule_ids, "unregistered_target"))
+        rule_ids.append("draft_mention_dropped")
     if intent == QueryIntent.SEMANTIC_SEARCH and not target_ids:
         if grounded_semantic_query is None:
             return _result_with_issue(

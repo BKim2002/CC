@@ -2480,3 +2480,104 @@ def test_described_behaviour_outranks_a_spelling_suggestion() -> None:
     )
 
     assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+
+
+# The entry model copies the user's noun phrase into target_mentions.  Each of
+# these was rejected as an unregistered competency before the split between
+# declared and incidental mentions.
+_SCOPE_NOUN_COPIES = [
+    ("역량 목록 좀 알려줘", "catalog_query", "역량 목록", QueryIntent.CATALOG_QUERY),
+    ("역량 종류 좀 알려줘", "catalog_query", "역량 종류", QueryIntent.CATALOG_QUERY),
+    ("전체 역량 목록 좀 알려줘", "catalog_query", "전체 역량 목록", QueryIntent.CATALOG_QUERY),
+    ("등록된 역량 다 보여줘", "catalog_query", "등록된 역량", QueryIntent.CATALOG_QUERY),
+    ("어떤 역량들이 있어?", "catalog_query", "역량들", QueryIntent.CATALOG_QUERY),
+    ("역량 리스트 뽑아줘", "catalog_query", "역량 리스트", QueryIntent.CATALOG_QUERY),
+    ("위계 구조 알려줘", "hierarchy_query", "위계 구조", QueryIntent.HIERARCHY_QUERY),
+    ("역량 트리 보여줘", "hierarchy_query", "역량 트리", QueryIntent.HIERARCHY_QUERY),
+    ("검사별 역량 수 알려줘", "aggregate_query", "검사별 역량 수", QueryIntent.AGGREGATE_QUERY),
+    ("분석에 포함되는 역량만", "catalog_query", "분석에 포함되는 역량", QueryIntent.CATALOG_QUERY),
+]
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "intent_hint", "copied", "expected_intent"),
+    _SCOPE_NOUN_COPIES,
+    ids=[case[0] for case in _SCOPE_NOUN_COPIES],
+)
+def test_copied_scope_noun_does_not_become_an_unregistered_name(
+    raw_query: str,
+    intent_hint: str,
+    copied: str,
+    expected_intent: QueryIntent,
+) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint, target_mentions=[copied]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.intent == expected_intent
+    assert "draft_mention_dropped" in result.applied_rule_ids
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "intent_hint", "copied", "expected_intent"),
+    _SCOPE_NOUN_COPIES,
+    ids=[case[0] for case in _SCOPE_NOUN_COPIES],
+)
+def test_scope_questions_are_unaffected_by_whether_the_draft_copies_a_noun(
+    raw_query: str,
+    intent_hint: str,
+    copied: str,
+    expected_intent: QueryIntent,
+) -> None:
+    snapshot = _snapshot()
+    with_copy = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint, target_mentions=[copied]),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+    without_copy = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+
+    assert with_copy.plan == without_copy.plan
+
+
+def test_incidental_draft_mention_close_to_a_name_is_offered_as_a_correction() -> None:
+    # "공감셩 알려줘" carries no particle marking it as a target, so it lands in
+    # the incidental bucket - but it is still worth a suggestion.
+    result = normalize_registry_query(
+        raw_query="공감셩 알려줘",
+        draft=_draft("item_lookup", target_mentions=["공감셩"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert "공감성" in [option.label for option in result.issue.options]
+
+
+def test_explicitly_named_unknown_still_reports_unregistered_beside_a_known_name() -> None:
+    # A name the user marked as a target keeps its authority even though it
+    # arrived through the draft; only incidental mentions are droppable.
+    result = normalize_registry_query(
+        raw_query="전략성, 정의감의 정의",
+        draft=_draft("item_lookup", target_mentions=["전략성", "정의감"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.unregistered_target is not None
+    assert result.unregistered_target.target_mentions == ["정의감"]
+    assert "draft_mention_dropped" not in result.applied_rule_ids
