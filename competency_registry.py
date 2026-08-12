@@ -8,7 +8,7 @@ and keeps the returned snapshot in memory.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -70,6 +70,24 @@ class RegistryValidationError(ValueError):
     """Raised when a stored registry cannot safely be used at runtime."""
 
 
+def _derive_id_lookup(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Index items by stable ID for a snapshot built without an explicit map.
+
+    ``build_registry_snapshot`` already validates every item, so this path only
+    runs for directly constructed snapshots.  A missing ID is reported as a
+    registry error instead of surfacing as a bare ``KeyError`` from a
+    comprehension.
+    """
+
+    derived: dict[str, Mapping[str, Any]] = {}
+    for item in document.get("items", ()):
+        item_id = item.get("id") if isinstance(item, Mapping) else None
+        if not item_id:
+            raise RegistryValidationError("레지스트리 항목에 stable ID가 없습니다.")
+        derived[str(item_id)] = item
+    return derived
+
+
 @dataclass(frozen=True)
 class RegistrySnapshot:
     """One validated, active competency-registry version held in memory."""
@@ -84,13 +102,15 @@ class RegistrySnapshot:
     canonical_names: tuple[str, ...]
     name_catalog: str
     semantic_catalog: str
+    id_lookup: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Recursively freeze every registry view while preserving aliases."""
 
-        # A single memo is shared across all three views.  Consequently an
-        # item referenced by document, canonical_lookup, and an alias remains
-        # the exact same frozen object rather than three independent copies.
+        # A single memo is shared across every view.  Consequently an item
+        # referenced by document, id_lookup, canonical_lookup, and an alias
+        # remains the exact same frozen object rather than independent copies.
+        id_lookup = self.id_lookup or _derive_id_lookup(self.document)
         memo: dict[int, object] = {}
         object.__setattr__(
             self,
@@ -101,6 +121,11 @@ class RegistrySnapshot:
             self,
             "lookup",
             _deep_freeze(self.lookup, memo),
+        )
+        object.__setattr__(
+            self,
+            "id_lookup",
+            _deep_freeze(id_lookup, memo),
         )
         object.__setattr__(
             self,
@@ -427,6 +452,7 @@ def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
             "DB item_count와 registry_json의 실제 항목 수가 일치하지 않습니다."
         )
 
+    id_lookup = {item["id"]: item for item in items}
     canonical_lookup = {item["name"]: item for item in items}
     lookup = dict(canonical_lookup)
     for item in items:
@@ -445,6 +471,7 @@ def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
         canonical_names=canonical_names,
         name_catalog=_build_name_catalog(canonical_names, canonical_lookup),
         semantic_catalog=_build_semantic_catalog(canonical_names, canonical_lookup),
+        id_lookup=id_lookup,
     )
 
 

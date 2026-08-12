@@ -97,9 +97,11 @@ def test_snapshot_recursively_freezes_shared_registry_items() -> None:
     document_item = snapshot.document["items"][0]
     canonical_item = snapshot.canonical_lookup["역량 알파"]
     alias_item = snapshot.lookup["알파"]
+    id_item = snapshot.id_lookup["synthetic:alpha"]
 
     assert document_item is canonical_item
     assert canonical_item is alias_item
+    assert alias_item is id_item
 
     with pytest.raises(TypeError):
         canonical_item["definition"] = "변조"  # type: ignore[index]
@@ -362,3 +364,27 @@ def test_small_synthetic_registry_is_valid_without_62_items() -> None:
     row["item_count"] = 1
 
     assert len(build_registry_snapshot(row).canonical_names) == 1
+
+
+def test_snapshot_derives_id_lookup_and_reports_a_missing_stable_id() -> None:
+    row = _row()
+    snapshot = build_registry_snapshot(row)
+    first = snapshot.document["items"][0]
+
+    # The production path always supplies id_lookup; a directly constructed
+    # snapshot derives it instead.
+    assert snapshot.id_lookup[first["id"]]["name"] == first["name"]
+
+    with pytest.raises(RegistryValidationError, match="stable ID"):
+        competency_registry.RegistrySnapshot(
+            version_id=snapshot.version_id,
+            source_filename=snapshot.source_filename,
+            source_sha256=snapshot.source_sha256,
+            schema_version=snapshot.schema_version,
+            document={"items": [{"name": "id 없는 항목"}]},
+            lookup={},
+            canonical_lookup={},
+            canonical_names=(),
+            name_catalog="",
+            semantic_catalog="",
+        )

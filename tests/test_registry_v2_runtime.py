@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 
 import competency_interpreter
+from competency_query import (
+    ItemField,
+    QueryIntent,
+    RegistryQueryPlan,
+    build_grounded_answer_context,
+    execute_registry_query,
+    render_grounded_fallback,
+)
 from competency_registry import build_registry_snapshot
 from scripts import upload_competency_registry as uploader
 from scripts.registry_compiler import compile_registry
@@ -195,13 +203,16 @@ def test_new_v2_snapshot_ignores_stale_checkpoint_names_and_answers_deep_path(
         ["삭제된 이전 후보", "깊이 5"]
     ) == ["깊이 5"]
 
-    answer = competency_interpreter.produce_answer(
-        {
-            "matched_items": [document["items"][-1]],
-            "requested_fields": ["path"],
-        }
-    )["messages"].content
+    plan = RegistryQueryPlan(
+        intent=QueryIntent.ITEM_LOOKUP,
+        user_question="깊이 5의 위계 구조는?",
+        target_ids=["stable-4"],
+        fields=[ItemField.PATH],
+    )
+    result = execute_registry_query(plan, snapshot)
+    context = build_grounded_answer_context(plan, result, snapshot)
+    answer = render_grounded_fallback(context)
     assert (
-        "위계 구조: 가상 검사 루트 > 깊이 1 > 깊이 2 > 깊이 3 > 깊이 4 > 깊이 5"
+        "등록 경로: 가상 검사 루트 > 깊이 1 > 깊이 2 > 깊이 3 > 깊이 4 > 깊이 5"
         in answer
     )
