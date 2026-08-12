@@ -54,15 +54,19 @@ BROKEN 2건은 이번 사안이 아니다.
 
 ### 미해결 mention 3단 판정
 
-```
-초안 mention이 레지스트리 항목으로 해석되지 않음
-   ├─ 근접 매칭 후보 있음 → CLARIFICATION  "책임성을 찾으시나요?" (최대 3개)
-   └─ 후보 없음          → DROP, 원문 해석으로 진행
-                           (초안 mention은 단독으로 미등록 판정을 만들지 않는다)
+**구현 중 정정됨.** 아래는 최종 규칙이다. 원안은 출처(원문/초안)로 갈랐으나, 그 규칙은 `전략성, 정의감의 정의`에서 사용자가 명시적으로 지목한 미등록 이름 `정의감`을 조용히 삼켰다. 기존 테스트 2건이 이를 잡아냈다.
 
-원문 유래 unknown (_unknown_mentions_from_raw)
-   → semantic → near-match → UNREGISTERED 순서
+갈라야 할 축은 출처가 아니라 **사용자가 얼마나 강하게 단언했는가**이며, 그 판별자는 이미 `_looks_like_explicit_unknown_target`으로 존재했다. 조사로 대상임을 표시한 표현에는 True, 측정한 범위 명사 10건 전부에는 False를 반환한다.
+
 ```
+declared  = 원문 유래 unknown + 조사로 대상 표시된 초안 mention
+   → semantic → near-match → UNREGISTERED
+
+incidental = 다른 대상이 없어서 남은 초안 mention
+   → semantic → near-match → DROP (미등록 판정으로 승격하지 않는다)
+```
+
+`has_unknown_targets`와 관계 판정 게이트에는 **declared만** 전달한다. incidental을 포함하면 명사구가 복사된 catalog 질문이 item lookup으로 오분류된다.
 
 기대 동작:
 
@@ -73,6 +77,7 @@ BROKEN 2건은 이번 사안이 아니다.
 | `혁신성이 뭐야?` | UNREGISTERED | UNREGISTERED (원문 유래) |
 | `그릿의 정의 알려줘` | UNREGISTERED | UNREGISTERED (원문 유래) |
 | `책임성 목록 보여줘` | 정상 | 정상 (원문 스캔) |
+| `전략성, 정의감의 정의` | UNREGISTERED | UNREGISTERED 유지 (declared) |
 
 ### 채택하지 않은 대안
 

@@ -8,7 +8,7 @@
 
 ---
 
-## 1단계 — 근접 매칭 기본기 (동작 변경 없음)
+## 1단계 — 근접 매칭 기본기 (동작 변경 없음) ✅
 
 `competency_query.py`
 
@@ -49,7 +49,7 @@
 
 ---
 
-## 2단계 — unknown 출처 분리 (순수 리팩터, 동작 변경 없음)
+## 2단계 — unknown 출처 분리 (순수 리팩터, 동작 변경 없음) ✅
 
 `competency_query.py` · `normalize_registry_query`
 
@@ -69,7 +69,7 @@
 
 ---
 
-## 3단계 — 원문 유래 unknown에 근접 매칭 적용
+## 3단계 — 원문 유래 unknown에 근접 매칭 적용 ✅
 
 `competency_query.py:2032` 분기를 `raw_unknown_mentions`만 보도록 좁히고 순서를 정한다.
 
@@ -94,7 +94,7 @@ if raw_unknown_mentions:
 
 ---
 
-## 4단계 — 초안 유래 unknown 처리 변경 (실제 수정)
+## 4단계 — 초안 유래 unknown 처리 변경 (실제 수정) ✅
 
 두 가지를 동시에 바꾼다. 분리하면 중간 상태가 일관되지 않는다.
 
@@ -136,7 +136,7 @@ if draft_unknown_mentions:
 
 ---
 
-## 5단계 — Gateway 프롬프트 위생
+## 5단계 — Gateway 프롬프트 위생 ✅
 
 `competency_interpreter.py` · `_gateway_prompt`
 
@@ -150,7 +150,7 @@ registry_query 초안 지침 단락에 한 줄 추가:
 
 ---
 
-## 6단계 — 문서
+## 6단계 — 문서 ✅
 
 - `WEB_CHAT_README.md`: 미해결 mention 3단 판정과 오타 근접 안내를 동작 설명에 반영
 - 메트릭 문단에 `near_match_target` 추가
@@ -173,3 +173,22 @@ registry_query 초안 지침 단락에 한 줄 추가:
 ## 되돌리기
 
 각 단계가 독립 커밋이다. 4단계에서 문제가 생기면 3단계까지 되돌려도 시스템은 일관된다(근접 매칭이 원문 경로에만 적용된 상태). 1~2단계는 동작 변경이 없어 언제든 안전하다.
+
+---
+
+## 완료 기록 (2026-08-12)
+
+| 단계 | 커밋 | 테스트 |
+|:-:|---|:-:|
+| 1 | `efe38c3` | 891 |
+| 2 | `bf612c2` | 891 |
+| 3 | `60b3b45` | 897 |
+| 4 | `350cced` | 919 |
+| 5·6 | 이 커밋 | 920 |
+
+측정 재실행 결과 **FRAGILE 10 → 0, SAFE 12 → 22, LEAK 0**.
+
+계획 대비 두 곳이 달라졌다.
+
+- **3단계**를 순수 가산적으로 유지했다. 계획대로 분기를 raw로 좁히면 초안 unknown의 미등록 판정이 그 시점에 멈춰 4단계의 동작 변경이 앞당겨진다.
+- **4단계**의 규칙이 출처 기준에서 단언 강도 기준(declared/incidental)으로 정교화됐다. 기존 테스트 2건이 원안의 silent-wrong을 잡아냈고, 판별자는 이미 있던 `_looks_like_explicit_unknown_target`을 썼다.

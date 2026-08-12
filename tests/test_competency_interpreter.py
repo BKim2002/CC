@@ -2081,6 +2081,18 @@ def test_stale_stable_id_is_not_recovered_from_a_name_string() -> None:
     assert "deleted-id" not in prompt
 
 
+def test_gateway_prompt_keeps_scope_nouns_out_of_target_mentions() -> None:
+    # Hygiene only: the normalizer drops an incidental mention anyway, but the
+    # entry model copying "역량 목록" as a target is what started the problem.
+    prompt = competency_interpreter._gateway_prompt(
+        {"messages": [HumanMessage(content="역량 목록 좀 알려줘")]}
+    )
+
+    assert "이름처럼 보이는 표현만" in prompt
+    assert "target이 아니라 constraint" in prompt
+    assert "target_mentions를 비워" in prompt
+
+
 def test_different_threads_do_not_share_gateway_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

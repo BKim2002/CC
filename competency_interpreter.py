@@ -398,6 +398,10 @@ registry_query에서는 사용자가 실제로 쓴 target과 constraint의 짧�
 초안만 만드세요. canonical name, stable ID, 정확한 enum이나 최종 filter를 발명하지
 마세요. 모호함을 임의로 해결하지 말고 Query Normalizer가 판단하게 하세요.
 
+target_mentions에는 등록 역량의 이름처럼 보이는 표현만 넣으세요. 목록ㆍ종류ㆍ전체ㆍ
+리스트ㆍ위계ㆍ구조ㆍ개수처럼 범위나 형식을 가리키는 말은 target이 아니라 constraint
+입니다. 이름이 없는 질문이면 target_mentions를 비워 두세요.
+
 우선순위:
 - 인사와 역량 질문이 섞이면 registry_query이며 acknowledge_greeting=true입니다.
 - 역량 질문과 범위 밖 요청이 섞이면 registry_query를 우선하고
