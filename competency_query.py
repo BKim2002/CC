@@ -2111,12 +2111,22 @@ def normalize_registry_query(
     semantic_description = _clean_public_mention(draft_data.get("semantic_description"))
     grounded_semantic_query = _grounded_semantic_query(raw_query, semantic_description)
     if unknown_mentions:
+        # A described behaviour is a stronger signal than spelling proximity,
+        # so the semantic route keeps precedence over any suggestion.
         if grounded_semantic_query is not None:
             return _result_with_semantic_request(
                 grounded_semantic_query,
                 unknown_mentions,
                 (*rule_ids, "unknown_target_semantic_request"),
             )
+        if raw_unknown_mentions:
+            near_names = _near_registered_names(raw_unknown_mentions[0], snapshot)
+            if near_names:
+                return _result_with_near_match(
+                    raw_unknown_mentions[0],
+                    near_names,
+                    (*rule_ids, "near_match_suggestion"),
+                )
         return _result_with_unregistered(unknown_mentions, (*rule_ids, "unregistered_target"))
     if intent == QueryIntent.SEMANTIC_SEARCH and not target_ids:
         if grounded_semantic_query is None:

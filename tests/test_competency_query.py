@@ -2414,3 +2414,69 @@ def test_near_match_result_is_a_clarification_with_registered_options() -> None:
 def test_near_match_result_requires_at_least_one_candidate() -> None:
     with pytest.raises(ValueError):
         competency_query._result_with_near_match("공감셩", [], ())
+
+
+def test_mistyped_name_in_the_raw_query_gets_a_suggestion() -> None:
+    result = normalize_registry_query(
+        raw_query="공감셩이 뭐야?",
+        draft=_draft("item_lookup", target_mentions=["공감셩"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert "공감성" in [option.label for option in result.issue.options]
+    assert "near_match_suggestion" in result.applied_rule_ids
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    ["그릿이 뭐야?", "리더십이 뭐야?", "창의력의 정의를 알려줘"],
+)
+def test_unrelated_unknown_name_still_reports_unregistered(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("item_lookup"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+
+
+def test_unregistered_name_close_to_a_registered_one_is_offered_as_a_choice() -> None:
+    """A near miss need not be a typo to be worth suggesting.
+
+    "회복탄력성" is a real concept that is not in this registry, but it sits
+    close to the registered "회복성".  Offering that as a choice the user can
+    decline beats a dead end, so this is intended rather than a false positive.
+    """
+
+    result = normalize_registry_query(
+        raw_query="회복탄력성의 정의를 알려줘",
+        draft=_draft("item_lookup"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert [option.label for option in result.issue.options] == ["회복성"]
+
+
+def test_described_behaviour_outranks_a_spelling_suggestion() -> None:
+    result = normalize_registry_query(
+        raw_query="공감셩이 뭐야? 팀원의 감정을 살피는 행동을 말하는 거야",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["공감셩"],
+            semantic_description="팀원의 감정을 살피는 행동",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
