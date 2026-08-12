@@ -6,7 +6,7 @@
 
 우선순위 = (Impact + Risk) × (6 − Effort). 각 축 1~5.
 
-**진행 상황 (2026-08-11):** Phase 1 완료 (커밋 `c6b0a49`), Phase 2 완료 (`2d2fc0d`). 이후 범위 밖 응답을 템플릿으로 전환했다 ([ADR-002](adr/ADR-002-out-of-scope-template.md)). Phase 3는 머지 후 별도 PR로 남아 있다. 테스트 740 → 869.
+**진행 상황 (2026-08-12):** Phase 1·2 완료 (`c6b0a49`, `2d2fc0d`, PR #5로 머지). 이후 범위 밖 응답을 템플릿으로 전환했고 ([ADR-002](adr/ADR-002-out-of-scope-template.md)), 미해결 mention 3단 판정과 Phase 3를 PR #6에 담았다. **Phase 1~3 전부 완료.** 테스트 740 → 920.
 
 ---
 
@@ -122,11 +122,15 @@ ADR-001의 정책 비대칭을 `main`에 들이지 않는 것이 목적. PR이 �
 - [x] **R5a** 폴링 지수 백오프 (10ms → 100ms 상한), sync/async 락 공유 이유를 주석으로 고정
 - [ ] **R10** PR 본문 갱신 — push 이후
 
-### Phase 3 — 머지 후, 별도 PR
+### Phase 3 — 완료 (PR #6에 동봉)
 
-- **R1** normalizer 분해 — 순서 의존성 검증 테스트 확보가 선행 조건
-- **R2** `instrument_labels` → `instrument_refs` 명명 정리 — diff 노이즈가 커서 단독 PR
-- **R4** `astream` 유지/전환 재판단 — D1 이후 증분 delta 공개 가능성을 먼저 평가
+- [x] **R1** normalizer 분해 — 599 → 408줄. 계획의 전면 stage 분해 대신 입출력 면이 좁은 세 블록(filter·instrument·relation)만 순수 함수로 추출했다. 결합도를 먼저 측정한 결과 `rule_ids`가 574줄에 걸쳐 36회, `target_ids`가 520줄에 걸쳐 17회 읽혀, context 객체가 20개 필드에 이른다. 복잡도를 줄이는 게 아니라 옮기는 셈이라 채택하지 않았다. 호출 순서가 그대로라 분기 우선순위는 구성상 보존되며, 테스트 파일 수정 0줄이 그 증거다.
+- [x] **R2** `instrument_labels` → `instrument_refs`. 이 필드는 label만 담은 적이 없다 — 정규화기가 id를 넣고 `validate_parsed_query`가 양쪽을 해석한다. 호출부 5곳, 전부 내부.
+- [x] **R4** `astream` **유지**. 코드 변경 없이 근거만 기록했다.
+
+**R4 판단 근거.** 증분 delta 공개는 D1과 무관하게 불가능하다. 모든 grounding 검사가 전문을 읽는다 — 필수 이름과 그 순서, 총계, truncation 안내, 인사와 `[지원 범위]`의 위치. 부분 접두사는 검증할 수 없고, 검증 전 공개는 이 노드가 버퍼링하는 이유 자체를 무너뜨린다.
+
+그렇다면 `ainvoke`로 단순화할 수 있는가? 없다. `astream`이 주는 것은 증분 길이 가드다. 폭주 생성을 끝까지 버퍼링한 뒤 거부하는 대신 조기에 포기한다. 바꾸면 이걸 잃고 얻는 게 없다.
 
 ---
 

@@ -1619,6 +1619,13 @@ async def write_registry_answer(state: CompetencyState) -> dict[str, Any]:
     attempts = int(state.get("writer_attempts", 0) or 0)
     retry_issue = ""
 
+    # Streamed but never published incrementally.  Every grounding check reads
+    # the whole answer -- required names and their order, the total, the
+    # truncation notice, where the greeting and the scope section sit -- so a
+    # prefix cannot be validated, and publishing one would defeat the
+    # buffering this node exists for.  What streaming does buy is the length
+    # guard below, which abandons a runaway generation instead of buffering it
+    # to completion only to reject it.
     while attempts < 2 and budget.remaining_calls > 0:
         attempts += 1
         chunks: list[str] = []
