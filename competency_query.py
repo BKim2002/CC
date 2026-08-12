@@ -9,6 +9,7 @@ computed here from one immutable :class:`~competency_registry.RegistrySnapshot`.
 from __future__ import annotations
 
 from collections import OrderedDict
+import difflib
 from enum import Enum
 import re
 from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
@@ -34,6 +35,13 @@ MAX_ANSWER_CHARS = 20_000
 # connective prose.  Detailed registry facts are limited before they enter the
 # writer context, so an LLM cannot reconstruct omitted definitions or paths.
 MAX_GROUNDED_FACT_CHARS = 16_000
+# A mention that resolves to nothing may still be a mistyped registered name.
+# The cutoff sits in the measured gap between real typos (0.67 and above) and
+# genuinely different words (0.33 and below); see the design note.  One- and
+# two-character mentions are excluded because they match almost anything.
+NEAR_MATCH_CUTOFF = 0.6
+MAX_NEAR_MATCH_CANDIDATES = 3
+MIN_NEAR_MATCH_LENGTH = 2
 NOT_PROVIDED_DEFINITION = "독립적인 정의가 제공되어 있지 않음"
 WRITTEN_PROFILE_ID = "written_competency_v1"
 WRITTEN_INSTRUMENT_ID = "written_competency"
@@ -124,6 +132,10 @@ class NormalizationIssueCode(_ValueEnum):
 
     MISSING_TARGET = "missing_target"
     UNKNOWN_TARGET = "unknown_target"
+    # Distinct from AMBIGUOUS_TARGET: nothing matched exactly, so the registry
+    # is offering its closest names.  Keeping it separate lets the
+    # normalization_issue metric tell user typos from genuine name ambiguity.
+    NEAR_MATCH_TARGET = "near_match_target"
     AMBIGUOUS_TARGET = "ambiguous_target"
     AMBIGUOUS_RELATION = "ambiguous_relation"
     AMBIGUOUS_SCOPE = "ambiguous_scope"
@@ -867,6 +879,64 @@ def _default_issue_options(code: NormalizationIssueCode) -> list[NormalizationOp
             NormalizationOption(label="위계·관계", description="등록된 부모·자식·위계 구조 확인"),
         ]
     return []
+
+
+def _near_registered_names(mention: str, snapshot: RegistrySnapshot) -> list[str]:
+    """Return the closest canonical names for a mention that resolved to nothing.
+
+    Matching runs over every public label, aliases included, so a mistyped
+    alias still finds its item.  Results are reported as canonical names and
+    deduplicated by item id, because one item can be reached through several
+    labels.
+    """
+
+    candidate = _normalized_text(mention)
+    if len(candidate) < MIN_NEAR_MATCH_LENGTH:
+        return []
+    matches = difflib.get_close_matches(
+        candidate,
+        list(snapshot.lookup),
+        # Ask for extra labels: aliases and canonical names collapse onto the
+        # same item, so the list shrinks during deduplication.
+        n=MAX_NEAR_MATCH_CANDIDATES * 2,
+        cutoff=NEAR_MATCH_CUTOFF,
+    )
+    names: list[str] = []
+    seen_ids: set[str] = set()
+    for label in matches:
+        item = snapshot.lookup.get(label)
+        if item is None:
+            continue
+        item_id = str(item["id"])
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        names.append(str(item["name"]))
+        if len(names) == MAX_NEAR_MATCH_CANDIDATES:
+            break
+    return names
+
+
+def _result_with_near_match(
+    mention: str,
+    candidates: Iterable[str],
+    rule_ids: Iterable[str],
+) -> RegistryNormalizationResult:
+    """Offer the registry's closest names instead of rejecting the mention."""
+
+    options = [
+        NormalizationOption(label=name, description="현재 레지스트리의 정식 이름")
+        for name in candidates
+    ]
+    if not options:
+        raise ValueError("근접 매칭 결과에는 하나 이상의 후보가 필요합니다.")
+    return _result_with_issue(
+        NormalizationIssueCode.NEAR_MATCH_TARGET,
+        f"'{_normalized_text(mention)}'과(와) 가장 가까운 등록 역량을 찾았습니다. "
+        "어느 것을 뜻하는지 선택해 주세요.",
+        options=options,
+        rule_ids=rule_ids,
+    )
 
 
 def _result_with_issue(

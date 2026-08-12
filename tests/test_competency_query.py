@@ -2298,3 +2298,119 @@ def test_six_registered_node_levels_render_without_level_hardcoding() -> None:
     context = build_grounded_answer_context(plan, execute_registry_query(plan, expanded), expanded)
     assert context.hierarchy_text is not None
     assert all(f"6단계 노드 {depth}" in context.hierarchy_text for depth in range(1, 7))
+
+
+# ---------------------------------------------------------------------------
+# Near-match suggestions for mentions that resolve to nothing
+# ---------------------------------------------------------------------------
+
+# One syllable swapped for a visually and phonetically close one, the shape of
+# an ordinary Korean typo.
+_TYPO_SYLLABLES = {
+    "성": "셩",
+    "력": "렵",
+    "도": "됴",
+    "구": "규",
+    "측": "책",
+    "수": "슈",
+    "능": "늠",
+    "매": "맹",
+    "통": "툥",
+    "화": "홰",
+}
+
+
+def _one_syllable_typo(name: str) -> str | None:
+    for index, char in enumerate(name):
+        if char in _TYPO_SYLLABLES:
+            return name[:index] + _TYPO_SYLLABLES[char] + name[index + 1 :]
+    return None
+
+
+@pytest.mark.parametrize(
+    ("mention", "expected"),
+    [
+        ("공감셩", "공감성"),
+        ("분석렵", "분석력"),
+        ("전략썽", "전략성"),
+        ("전략", "전략성"),
+    ],
+)
+def test_near_match_recovers_a_mistyped_registered_name(
+    mention: str,
+    expected: str,
+) -> None:
+    assert expected in competency_query._near_registered_names(mention, _snapshot())
+
+
+@pytest.mark.parametrize(
+    "mention",
+    ["그릿", "역량 목록", "전체 역량 목록", "위계 구조", "오늘 날씨"],
+)
+def test_near_match_stays_silent_for_non_names(mention: str) -> None:
+    assert competency_query._near_registered_names(mention, _snapshot()) == []
+
+
+@pytest.mark.parametrize("mention", ["", "성", "력"])
+def test_near_match_ignores_mentions_below_the_length_floor(mention: str) -> None:
+    # A single syllable is close to far too much of the registry to be a signal.
+    assert competency_query._near_registered_names(mention, _snapshot()) == []
+
+
+def test_near_match_caps_the_candidate_count() -> None:
+    # "공감성 하위" is close to three siblings plus their parent.
+    candidates = competency_query._near_registered_names("공감성 하위", _snapshot())
+
+    assert 0 < len(candidates) <= competency_query.MAX_NEAR_MATCH_CANDIDATES
+
+
+def test_near_match_reports_canonical_names_and_deduplicates_by_item() -> None:
+    snapshot = _snapshot()
+    # "종합점수" is an alias of "역검 종합점수"; both labels point at one item.
+    candidates = competency_query._near_registered_names("종합점슈", snapshot)
+
+    assert "역검 종합점수" in candidates
+    assert "종합점수" not in candidates
+    assert len(candidates) == len(set(candidates))
+
+
+def test_every_registered_name_survives_a_single_syllable_typo() -> None:
+    """The registry has near-identical sibling names by design.
+
+    They collide with each other far above the cutoff, which is harmless: a
+    label that resolves exactly never reaches near-matching.  What has to hold
+    is that a typo still recovers the name it was typed from.
+    """
+
+    snapshot = _snapshot()
+    missed: list[tuple[str, str, list[str]]] = []
+    checked = 0
+    for name in snapshot.canonical_names:
+        typo = _one_syllable_typo(name)
+        if typo is None or typo in snapshot.lookup:
+            continue
+        checked += 1
+        candidates = competency_query._near_registered_names(typo, snapshot)
+        if name not in candidates:
+            missed.append((typo, name, candidates))
+
+    assert checked >= 50, "fixture should cover a production-sized registry"
+    assert missed == []
+
+
+def test_near_match_result_is_a_clarification_with_registered_options() -> None:
+    result = competency_query._result_with_near_match(
+        "공감셩", ["공감성"], ("near_match_suggestion",)
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert [option.label for option in result.issue.options] == ["공감성"]
+    assert "공감셩" in result.issue.question
+    assert result.applied_rule_ids == ["near_match_suggestion"]
+
+
+def test_near_match_result_requires_at_least_one_candidate() -> None:
+    with pytest.raises(ValueError):
+        competency_query._result_with_near_match("공감셩", [], ())
