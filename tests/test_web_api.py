@@ -898,9 +898,8 @@ def test_out_of_scope_template_sse_matches_non_stream_and_checkpoint_history(
     # Out-of-scope answers come from a template, so the exact public string is
     # pinned here; the Gateway is the only model call in the turn.
     expected = (
-        "서울 날씨에 관해 궁금하신 점을 이해했습니다. "
-        "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 답하거나 "
-        "판단하지 않습니다. "
+        "서울 날씨에 관한 질문은 제가 알려드릴 수 없습니다. "
+        "이 챗봇은 등록된 역량 정보만 다루는 범위로 한정되어 있습니다. "
         "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 후보를 "
         "찾아볼 수 있습니다."
     )

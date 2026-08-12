@@ -1083,3 +1083,48 @@ def test_template_never_echoes_a_hostile_topic_summary(hostile: str) -> None:
         summary=hostile,
         raw_query="오늘 날씨 어때?",
     ) == answer
+
+
+@pytest.mark.parametrize(
+    ("acknowledgement", "summary", "raw_query", "accepted"),
+    [
+        ("오늘 날씨에 관한 질문은 제가 알려드릴 수 없습니다", "오늘 날씨", "오늘 날씨 어때?", True),
+        ("오늘 날씨에 관해 궁금하신 점을 이해했습니다", "오늘 날씨", "오늘 날씨 어때?", True),
+        ("I can't answer questions about the weather", "the weather", "What is the weather?", True),
+        # Naming the limit does not license an answer alongside it.
+        (
+            "오늘 날씨에 관한 질문은 제가 알려드릴 수 없지만 서울은 맑습니다",
+            "오늘 날씨",
+            "오늘 날씨 어때?",
+            False,
+        ),
+        # The topic still has to be reflected.
+        ("질문은 제가 알려드릴 수 없습니다", "오늘 날씨", "오늘 날씨 어때?", False),
+    ],
+)
+def test_refusal_acknowledgement_shape_is_accepted_but_still_answer_free(
+    acknowledgement: str,
+    summary: str,
+    raw_query: str,
+    accepted: bool,
+) -> None:
+    english = "can't" in acknowledgement
+    result = validate_scope_draft(
+        OutOfScopeResponseDraft(
+            acknowledgement=acknowledgement,
+            scope_boundary=(
+                "This chat is limited to registered competency information"
+                if english
+                else "이 챗봇은 등록된 역량 정보만 다루는 범위로 한정되어 있습니다"
+            ),
+            registry_redirect=(
+                OUT_OF_SCOPE_REDIRECTS_EN[0] if english else OUT_OF_SCOPE_REDIRECTS_KO[0]
+            ),
+        ),
+        mode="out_of_scope",
+        category="weather",
+        summary=summary,
+        raw_query=raw_query,
+    )
+
+    assert (result is not None) is accepted

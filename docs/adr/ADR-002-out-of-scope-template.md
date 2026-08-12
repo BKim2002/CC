@@ -27,6 +27,16 @@ Scope 경로는 이 원칙에서 빠져 있었다. `write_scope_answer`는 Scope
 
 `scope_template_answer()`가 `out_of_scope_draft()`의 세 필드를 이어 붙여 최종 문자열을 만든다. `write_scope_answer`는 out_of_scope일 때 이 문자열을 바로 공개하고 `response_mode="scope_template"`으로 정상 종료한다. LLM 호출·재시도·요청 경로 검증이 모두 사라진다.
 
+### D1a. 인정 문장은 한계를 먼저 밝힌다
+
+첫 문장은 질문을 되풀이하는 `{주제}에 관해 궁금하신 점을 이해했습니다` 대신 한계를 바로 밝히는 `{주제}에 관한 질문은 제가 알려드릴 수 없습니다`를 쓴다. 되풀이는 사용자가 이미 아는 내용을 한 문장 더 읽게 만든다.
+
+이에 맞춰 두 번째 문장도 조정했다. 첫 문장이 거절을 말하므로 기존 boundary(`…직접 답하거나 판단하지 않습니다`)는 같은 말을 두 번 하게 된다. 이제 boundary는 거절이 아니라 **이유**를 말한다: `이 챗봇은 등록된 역량 정보만 다루는 범위로 한정되어 있습니다`.
+
+세 문장의 역할이 거절 → 이유 → 유도로 갈라져 중복이 없다. 영어도 같은 구조로 맞췄다.
+
+`_acknowledgement_shape_is_safe`에 이 형태를 추가하고 `관한`·`questions`를 허용 어휘에 넣었다. 형태가 늘어도 `_all_direct_answers_are_absent`와 `definition_claim_is_absent`는 그대로 적용되므로, 한계를 밝히면서 답까지 흘리는 문장은 여전히 거부된다.
+
 ### D2. redirect 4종 회전
 
 고정 문장 하나면 반복 사용자에게 경직되어 보이므로 registry redirect를 한국어·영어 각 4종 두고 턴마다 회전한다.

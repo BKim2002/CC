@@ -323,6 +323,9 @@ _SCOPE_SAFE_ROOTS = frozenset(
         "계시",
         "이해",
         "관해",
+        # Pure connective with no content of its own, needed by the
+        # "…에 관한 질문은 …" acknowledgement shape.
+        "관한",
         "안내",
         "설명",
         "조회",
@@ -486,6 +489,7 @@ _ENGLISH_SCOPE_WORDS = frozenset(
         "asked",
         "ask",
         "question",
+        "questions",
         "request",
         "looking",
         "interested",
@@ -640,6 +644,10 @@ def _acknowledgement_shape_is_safe(
         r"(?:을|를)?\s*요청하신\s*점을?\s*이해했습니다",
         r"(?:에\s*관해|에\s*대해)\s*궁금하신\s*점을?\s*이해했습니다",
         r"(?:에\s*관해|에\s*대해)\s*질문하신\s*점을?\s*이해했습니다",
+        # Naming the limit up front reads better than restating the question.
+        # It still answers nothing: the direct-answer and definition checks
+        # below apply to this shape exactly as they do to the others.
+        r"(?:에\s*관한|에\s*대한)\s*질문은\s*제가\s*알려드릴\s*수\s*없습니다",
         r".+(?:궁금하신|요청하신)\s*(?:것으로|점으로)\s*"
         r"이해(?:했습니다|했어요)",
         r".+(?:물어보셨네요|질문하셨네요)",
@@ -649,6 +657,7 @@ def _acknowledgement_shape_is_safe(
         r"i\s+understand\s+your\s+(?:question|request)\s+about\s+.+",
         r"you\s+(?:want|would\s+like)\s+to\s+(?:know|check)\s+.+",
         r"it\s+sounds\s+like\s+you\s+are\s+(?:curious|asking)\s+about\s+.+",
+        r"i\s+(?:can't|cannot)\s+answer\s+questions?\s+about\s+.+",
     )
     shaped = any(
         re.fullmatch(rf".+?{tail}", normalized)
@@ -1283,19 +1292,15 @@ def out_of_scope_draft(
     safe_summary = sanitize_topic_summary(summary, category, english=english)
     if english:
         return OutOfScopeResponseDraft(
-            acknowledgement=f"I understand that you're asking about {safe_summary}",
+            acknowledgement=f"I can't answer questions about {safe_summary}",
             scope_boundary=(
-                "This chat is limited to registered competency information and "
-                "does not answer that request directly"
+                "This chat is limited to registered competency information"
             ),
             registry_redirect=out_of_scope_redirect(variant, english=True),
         )
     return OutOfScopeResponseDraft(
-        acknowledgement=f"{safe_summary}에 관해 궁금하신 점을 이해했습니다",
-        scope_boundary=(
-            "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 "
-            "답하거나 판단하지 않습니다"
-        ),
+        acknowledgement=f"{safe_summary}에 관한 질문은 제가 알려드릴 수 없습니다",
+        scope_boundary="이 챗봇은 등록된 역량 정보만 다루는 범위로 한정되어 있습니다",
         registry_redirect=out_of_scope_redirect(variant, english=False),
     )
 
