@@ -9,9 +9,10 @@ computed here from one immutable :class:`~competency_registry.RegistrySnapshot`.
 from __future__ import annotations
 
 from collections import OrderedDict
+import difflib
 from enum import Enum
 import re
-from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Any, Iterable, Mapping, NamedTuple, Protocol, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -34,6 +35,13 @@ MAX_ANSWER_CHARS = 20_000
 # connective prose.  Detailed registry facts are limited before they enter the
 # writer context, so an LLM cannot reconstruct omitted definitions or paths.
 MAX_GROUNDED_FACT_CHARS = 16_000
+# A mention that resolves to nothing may still be a mistyped registered name.
+# The cutoff sits in the measured gap between real typos (0.67 and above) and
+# genuinely different words (0.33 and below); see the design note.  One- and
+# two-character mentions are excluded because they match almost anything.
+NEAR_MATCH_CUTOFF = 0.6
+MAX_NEAR_MATCH_CANDIDATES = 3
+MIN_NEAR_MATCH_LENGTH = 2
 NOT_PROVIDED_DEFINITION = "독립적인 정의가 제공되어 있지 않음"
 WRITTEN_PROFILE_ID = "written_competency_v1"
 WRITTEN_INSTRUMENT_ID = "written_competency"
@@ -124,6 +132,10 @@ class NormalizationIssueCode(_ValueEnum):
 
     MISSING_TARGET = "missing_target"
     UNKNOWN_TARGET = "unknown_target"
+    # Distinct from AMBIGUOUS_TARGET: nothing matched exactly, so the registry
+    # is offering its closest names.  Keeping it separate lets the
+    # normalization_issue metric tell user typos from genuine name ambiguity.
+    NEAR_MATCH_TARGET = "near_match_target"
     AMBIGUOUS_TARGET = "ambiguous_target"
     AMBIGUOUS_RELATION = "ambiguous_relation"
     AMBIGUOUS_SCOPE = "ambiguous_scope"
@@ -142,7 +154,9 @@ class ParsedRegistryQuery(_StrictModel):
 
     intent: QueryIntent
     target_names: list[StrictStr] = Field(default_factory=list)
-    instrument_labels: list[StrictStr] = Field(default_factory=list)
+    # Accepts either a registered instrument label or its id; the validator
+    # resolves both, so the name says "reference" rather than "label".
+    instrument_refs: list[StrictStr] = Field(default_factory=list)
     node_types: list[StrictStr] = Field(default_factory=list)
     hierarchy_tiers: list[HierarchyTier] = Field(default_factory=list)
     relation: RelationType | None = None
@@ -627,7 +641,7 @@ def validate_parsed_query(
     except ValueError as exc:
         return PlanValidationResult(clarification="현재 검사 도구 구성을 확인할 수 없습니다.", errors=[str(exc)])
     instrument_ids: list[str] = []
-    for raw_label in parsed.instrument_labels:
+    for raw_label in parsed.instrument_refs:
         label = raw_label.strip()
         instrument_id = instruments_by_label.get(label) or (label if label in instruments_by_id else None)
         if instrument_id is None:
@@ -867,6 +881,64 @@ def _default_issue_options(code: NormalizationIssueCode) -> list[NormalizationOp
             NormalizationOption(label="위계·관계", description="등록된 부모·자식·위계 구조 확인"),
         ]
     return []
+
+
+def _near_registered_names(mention: str, snapshot: RegistrySnapshot) -> list[str]:
+    """Return the closest canonical names for a mention that resolved to nothing.
+
+    Matching runs over every public label, aliases included, so a mistyped
+    alias still finds its item.  Results are reported as canonical names and
+    deduplicated by item id, because one item can be reached through several
+    labels.
+    """
+
+    candidate = _normalized_text(mention)
+    if len(candidate) < MIN_NEAR_MATCH_LENGTH:
+        return []
+    matches = difflib.get_close_matches(
+        candidate,
+        list(snapshot.lookup),
+        # Ask for extra labels: aliases and canonical names collapse onto the
+        # same item, so the list shrinks during deduplication.
+        n=MAX_NEAR_MATCH_CANDIDATES * 2,
+        cutoff=NEAR_MATCH_CUTOFF,
+    )
+    names: list[str] = []
+    seen_ids: set[str] = set()
+    for label in matches:
+        item = snapshot.lookup.get(label)
+        if item is None:
+            continue
+        item_id = str(item["id"])
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        names.append(str(item["name"]))
+        if len(names) == MAX_NEAR_MATCH_CANDIDATES:
+            break
+    return names
+
+
+def _result_with_near_match(
+    mention: str,
+    candidates: Iterable[str],
+    rule_ids: Iterable[str],
+) -> RegistryNormalizationResult:
+    """Offer the registry's closest names instead of rejecting the mention."""
+
+    options = [
+        NormalizationOption(label=name, description="현재 레지스트리의 정식 이름")
+        for name in candidates
+    ]
+    if not options:
+        raise ValueError("근접 매칭 결과에는 하나 이상의 후보가 필요합니다.")
+    return _result_with_issue(
+        NormalizationIssueCode.NEAR_MATCH_TARGET,
+        f"'{_normalized_text(mention)}'과(와) 가장 가까운 등록 역량을 찾았습니다. "
+        "어느 것을 뜻하는지 선택해 주세요.",
+        options=options,
+        rule_ids=rule_ids,
+    )
 
 
 def _result_with_issue(
@@ -1645,6 +1717,289 @@ def _validation_issue(
     return _result_with_issue(code, question, rule_ids=rule_ids)
 
 
+class _FilterSelection(NamedTuple):
+    root_only: bool
+    leaf_only: bool
+    flags: dict[str, set[bool]]
+    definition_statuses: list[str]
+
+
+def _resolve_filters(
+    raw_query: str,
+    accepted_constraints: Iterable[tuple[str, str]],
+    rule_ids: Iterable[str],
+) -> tuple[_FilterSelection | None, RegistryNormalizationResult | None]:
+    """Read boolean item filters from the query and the accepted constraints.
+
+    Returns the selection, or the clarification to send when the requested
+    filters contradict each other.  Exactly one of the two is not ``None``.
+    """
+
+    normalized_raw = _flexible_surface_text(raw_query)
+    unsupported_negated_filters = (
+        "루트 항목",
+        "최상위 항목",
+        "말단 항목",
+        "리프 항목",
+        "부모가 있는 항목",
+        "상위 항목이 있는 항목",
+        "자식이 있는 항목",
+        "하위 항목이 있는 항목",
+        "정의가 있는 항목",
+        "정의가 없는 항목",
+    )
+    if _has_explicitly_negated_mention(raw_query, unsupported_negated_filters):
+        return None, _result_with_issue(
+            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+            "제외할 필터와 조회할 범위가 함께 있습니다. 해당 조건을 포함할지 제외할지 선택해 주세요.",
+            options=(
+                NormalizationOption(label="조건 포함", description="표시한 조건에 맞는 항목만 조회"),
+                NormalizationOption(label="조건 제외", description="표시한 조건을 제외한 범위를 다시 지정"),
+            ),
+            rule_ids=(*rule_ids, "negated_filter_scope"),
+        )
+    root_only = bool(re.search(r"(?:루트|최상위)\s*항목", normalized_raw))
+    leaf_only = bool(re.search(r"(?:말단|리프)\s*항목", normalized_raw))
+    flags, definition_statuses = _filter_mentions(raw_query)
+    for kind, text in accepted_constraints:
+        if kind != "filter":
+            continue
+        root_only = root_only or bool(re.search(r"루트|최상위", text))
+        leaf_only = leaf_only or bool(re.search(r"말단|리프", text))
+        mentioned_flags, mentioned_statuses = _filter_mentions(text)
+        for flag, values in mentioned_flags.items():
+            flags[flag].update(values)
+        definition_statuses.extend(mentioned_statuses)
+    if root_only and leaf_only:
+        return None, _result_with_issue(
+            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+            "루트 항목과 말단 항목 조건을 동시에 적용할 수 없습니다. 하나를 선택해 주세요.",
+            options=(
+                NormalizationOption(label="루트 항목", description="등록된 부모가 없는 항목"),
+                NormalizationOption(label="말단 항목", description="등록된 자식이 없는 항목"),
+            ),
+            rule_ids=(*rule_ids, "conflicting_root_leaf"),
+        )
+    conflicting_filter = next(
+        (flag for flag, values in flags.items() if len(values) > 1),
+        None,
+    )
+    if conflicting_filter is not None:
+        label = {
+            "has_parent": "부모 존재",
+            "has_children": "자식 존재",
+            "analysis_included": "분석 포함",
+        }[conflicting_filter]
+        return None, _result_with_issue(
+            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+            f"{label} 조건이 서로 반대입니다. 포함과 제외 중 하나를 선택해 주세요.",
+            options=(
+                NormalizationOption(label=f"{label}: 예", description="조건을 충족하는 항목"),
+                NormalizationOption(label=f"{label}: 아니요", description="조건을 충족하지 않는 항목"),
+            ),
+            rule_ids=(*rule_ids, "conflicting_boolean_filter"),
+        )
+    return (
+        _FilterSelection(
+            root_only=root_only,
+            leaf_only=leaf_only,
+            flags=flags,
+            definition_statuses=_unique(definition_statuses),
+        ),
+        None,
+    )
+
+
+def _resolve_instruments(
+    raw_query: str,
+    snapshot: RegistrySnapshot,
+    accepted_constraints: Iterable[tuple[str, str]],
+    rule_ids: Iterable[str],
+) -> tuple[list[str] | None, RegistryNormalizationResult | None]:
+    """Decide which registered instruments the query scopes to.
+
+    The raw query is authoritative; an accepted constraint only fills in when
+    the wording named no instrument at all.  Returns the ids, or the
+    clarification to send when the scope is ambiguous, unknown or negated.
+    Exactly one of the two is not ``None``.
+    """
+
+    ambiguous_instrument_labels = _raw_ambiguous_instrument_labels(raw_query, snapshot)
+    if ambiguous_instrument_labels:
+        return None, _result_with_issue(
+            NormalizationIssueCode.AMBIGUOUS_SCOPE,
+            "같은 표기로 해석되는 등록 검사가 둘 이상입니다. 조회할 검사 범위를 선택해 주세요.",
+            options=(
+                NormalizationOption(label=label, description="현재 레지스트리의 등록 검사")
+                for label in ambiguous_instrument_labels[:3]
+            ),
+            rule_ids=(*rule_ids, "normalized_instrument_ambiguity"),
+        )
+    instrument_ids = _raw_instrument_ids(raw_query, snapshot)
+    raw_unknown_instruments = _raw_unknown_instruments(raw_query, snapshot)
+    if raw_unknown_instruments:
+        labels = _unique(str(item["instrument_label"]) for item in _items(snapshot))
+        return None, _result_with_issue(
+            NormalizationIssueCode.UNKNOWN_INSTRUMENT,
+            f"'{raw_unknown_instruments[0]}'은(는) 현재 등록된 검사 이름이 아닙니다. 검사 범위를 선택해 주세요.",
+            options=(
+                NormalizationOption(label=label, description="현재 등록된 검사")
+                for label in labels
+            ),
+            rule_ids=(*rule_ids, "unknown_instrument"),
+        )
+    unknown_instruments: list[str] = []
+    if not instrument_ids:
+        for kind, text in accepted_constraints:
+            if kind != "instrument":
+                continue
+            if not _looks_like_instrument_expression(text):
+                continue
+            resolved = _instrument_ids_for_text(text, snapshot)
+            if resolved:
+                instrument_ids.extend(resolved)
+            else:
+                unknown_instruments.append(text)
+    instrument_ids = _unique(instrument_ids)
+    if unknown_instruments:
+        labels = _unique(str(item["instrument_label"]) for item in _items(snapshot))
+        return None, _result_with_issue(
+            NormalizationIssueCode.UNKNOWN_INSTRUMENT,
+            f"'{unknown_instruments[0]}'은(는) 현재 등록된 검사 이름이 아닙니다. 검사 범위를 선택해 주세요.",
+            options=(
+                NormalizationOption(label=label, description="현재 등록된 검사")
+                for label in labels
+            ),
+            rule_ids=(*rule_ids, "unknown_instrument"),
+        )
+    instrument_surfaces: list[str] = []
+    for instrument_id in instrument_ids:
+        instrument_surfaces.extend((instrument_id, str(_instrument_catalog(snapshot)[0][instrument_id])))
+        if instrument_id == WRITTEN_INSTRUMENT_ID:
+            instrument_surfaces.extend(("필기", "필기검사", "필기 역량검사"))
+        elif instrument_id == VIDEO_INSTRUMENT_ID:
+            instrument_surfaces.extend(("영상", "영상면접"))
+    if instrument_ids and _has_explicitly_negated_mention(raw_query, instrument_surfaces):
+        by_id, _ = _instrument_catalog(snapshot)
+        return None, _result_with_issue(
+            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+            "제외할 검사와 조회할 검사 표현이 함께 있습니다. 실제로 포함할 검사 범위를 선택해 주세요.",
+            options=(
+                NormalizationOption(label=str(by_id[instrument_id]), description="조회에 포함할 등록 검사")
+                for instrument_id in instrument_ids[:3]
+            ),
+            rule_ids=(*rule_ids, "negated_instrument_scope"),
+        )
+    return instrument_ids, None
+
+
+class _RelationSelection(NamedTuple):
+    relation: RelationType | None
+    related_tier: HierarchyTier | None
+
+
+def _resolve_relation(
+    raw_query: str,
+    accepted_constraints: Iterable[tuple[str, str]],
+    rule_ids: Iterable[str],
+    *,
+    has_target: bool,
+    target_ids: Iterable[str],
+) -> tuple[_RelationSelection | None, RegistryNormalizationResult | None]:
+    """Pick at most one hierarchy relation, or ask which one was meant.
+
+    Relations are only looked for when the turn actually has something to
+    relate to.  The raw wording wins; an accepted constraint is consulted only
+    when the wording named no relation.  Exactly one return slot is not
+    ``None``.
+    """
+
+    target_ids = list(target_ids)
+    raw_relation_values: list[RelationType] = []
+    raw_relation_ambiguous = False
+    related_tier = None
+    if has_target:
+        raw_relation_values, raw_relation_ambiguous = _relation_values(raw_query)
+        related_tier = _related_tier_value(raw_query)
+    if raw_relation_ambiguous and not raw_relation_values:
+        direction = "상위" if "상위" in raw_query else "하위"
+        options = (
+            (_RELATION_OPTIONS[RelationType.PARENT], _RELATION_OPTIONS[RelationType.ANCESTORS])
+            if direction == "상위"
+            else (_RELATION_OPTIONS[RelationType.CHILDREN], _RELATION_OPTIONS[RelationType.DESCENDANTS])
+        )
+        return None, _result_with_issue(
+            NormalizationIssueCode.AMBIGUOUS_RELATION,
+            f"'{direction}'가 바로 연결된 한 단계인지 전체 경로인지 확인해 주세요.",
+            options=options,
+            rule_ids=(*rule_ids, "ambiguous_structural_relation"),
+        )
+    if len(raw_relation_values) > 1 or (raw_relation_values and related_tier is not None):
+        return None, _result_with_issue(
+            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+            "한 번에 서로 다른 위계 관계를 함께 요청했습니다. 확인할 관계를 하나만 선택해 주세요.",
+            options=(_RELATION_OPTIONS[value] for value in raw_relation_values[:3]),
+            rule_ids=(*rule_ids, "conflicting_relation_constraints"),
+        )
+
+    relation = raw_relation_values[0] if raw_relation_values else None
+    if relation is None and related_tier is None:
+        draft_relations: list[RelationType] = []
+        draft_relation_ambiguous = False
+        draft_related: list[HierarchyTier] = []
+        for kind, text in accepted_constraints:
+            if kind != "relation":
+                continue
+            values, ambiguous = _relation_values(text)
+            draft_relations.extend(values)
+            draft_relation_ambiguous = draft_relation_ambiguous or ambiguous
+            value = _related_tier_value(text)
+            if value is not None:
+                draft_related.append(value)
+        draft_relations = list(dict.fromkeys(draft_relations))
+        draft_related = list(dict.fromkeys(draft_related))
+        if draft_relation_ambiguous and not draft_relations:
+            return None, _result_with_issue(
+                NormalizationIssueCode.AMBIGUOUS_RELATION,
+                "바로 연결된 항목을 볼지 전체 상·하위 경로를 볼지 확인해 주세요.",
+                options=(
+                    _RELATION_OPTIONS[RelationType.PARENT],
+                    _RELATION_OPTIONS[RelationType.ANCESTORS],
+                    _RELATION_OPTIONS[RelationType.CHILDREN],
+                ),
+                rule_ids=(*rule_ids, "ambiguous_structural_relation"),
+            )
+        if len(draft_relations) + len(draft_related) > 1:
+            return None, _result_with_issue(
+                NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
+                "서로 다른 관계 조건이 함께 표시되어 있습니다. 확인할 관계를 하나만 선택해 주세요.",
+                options=(_RELATION_OPTIONS[value] for value in draft_relations[:3]),
+                rule_ids=(*rule_ids, "conflicting_relation_constraints"),
+            )
+        relation = draft_relations[0] if draft_relations else None
+        related_tier = draft_related[0] if draft_related else None
+
+    target_tier_mentions = _tier_values(raw_query) if target_ids else []
+    if (
+        target_ids
+        and relation is None
+        and related_tier is None
+        and target_tier_mentions
+        and re.search(r"(?:최하위|상위|중위|하위)\s*요인", _flexible_surface_text(raw_query))
+    ):
+        tier_labels = ", ".join(TIER_LABELS[tier] for tier in target_tier_mentions)
+        return None, _result_with_issue(
+            NormalizationIssueCode.AMBIGUOUS_RELATION,
+            f"{tier_labels}이(가) 지정한 역량과 관련된 단계인지 전체 검사 단계인지 확인해 주세요.",
+            options=(
+                NormalizationOption(label="지정 역량과 관련된 단계", description="대상 역량에서 연결되는 공식 단계"),
+                NormalizationOption(label=f"전체 {tier_labels}", description="필기 역량검사의 공식 단계 전체"),
+            ),
+            rule_ids=(*rule_ids, "target_official_tier_ambiguity"),
+        )
+    return _RelationSelection(relation=relation, related_tier=related_tier), None
+
+
 def normalize_registry_query(
     *,
     raw_query: str,
@@ -1726,7 +2081,14 @@ def normalize_registry_query(
         else []
     )
     draft_mentions = [value for value in draft_mentions if value]
-    unknown_mentions: list[str] = list(raw_target_mentions)
+    # Unresolved mentions are split by how strongly the user asserted them.
+    # A raw-query span and a draft mention the user clearly named as a target
+    # are declarations, and may still report an unregistered name.  A draft
+    # mention that only survived because nothing else was found is incidental:
+    # the entry model routinely copies scope nouns such as "역량 목록" there.
+    raw_unknown_mentions: list[str] = list(raw_target_mentions)
+    draft_explicit_unknowns: list[str] = []
+    incidental_draft_mentions: list[str] = []
     for mention in draft_mentions:
         # A draft target is merely a span hint.  If its normalized text does
         # not occur in the raw query, treating it as a target would grant the
@@ -1746,23 +2108,27 @@ def normalize_registry_query(
             )
         if resolved_ids:
             target_ids.extend(resolved_ids)
-        elif not _is_registry_field_stopword(mention) and (
-            (
-                not target_ids
-                and not (raw_reuse and active_previous)
-            )
-            or _looks_like_explicit_unknown_target(mention, raw_query)
-        ):
+        elif not _is_registry_field_stopword(mention):
             # Once an explicit registered raw span or previous-result scope
             # has been found, an unresolved draft mention cannot replace or
             # widen it. Gateway labels such as "정의" are only hints.
-            unknown_mentions.append(mention)
+            if _looks_like_explicit_unknown_target(mention, raw_query):
+                draft_explicit_unknowns.append(mention)
+            elif not target_ids and not (raw_reuse and active_previous):
+                incidental_draft_mentions.append(mention)
     target_ids = _unique(target_ids)
-    unknown_mentions = _unique(
-        mention
-        for mention in unknown_mentions
-        if not _resolve_target_mention(mention, owners)[0]
+
+    def _unresolved(mentions: Iterable[str]) -> list[str]:
+        return _unique(
+            mention
+            for mention in mentions
+            if not _resolve_target_mention(mention, owners)[0]
+        )
+
+    declared_unknown_mentions = _unresolved(
+        [*raw_unknown_mentions, *draft_explicit_unknowns]
     )
+    incidental_draft_mentions = _unresolved(incidental_draft_mentions)
     target_names = [str(snapshot.id_lookup[item_id]["name"]) for item_id in target_ids]
     target_surfaces = [
         str(label)
@@ -1788,155 +2154,29 @@ def normalize_registry_query(
         if kind and text and _text_occurs_in_query(text, raw_query):
             accepted_constraints.append((kind, text))
 
-    raw_relation_values: list[RelationType] = []
-    raw_relation_ambiguous = False
-    related_tier = None
-    if target_ids or unknown_mentions or (raw_reuse and active_previous):
-        raw_relation_values, raw_relation_ambiguous = _relation_values(raw_query)
-        related_tier = _related_tier_value(raw_query)
-    if raw_relation_ambiguous and not raw_relation_values:
-        direction = "상위" if "상위" in raw_query else "하위"
-        options = (
-            (_RELATION_OPTIONS[RelationType.PARENT], _RELATION_OPTIONS[RelationType.ANCESTORS])
-            if direction == "상위"
-            else (_RELATION_OPTIONS[RelationType.CHILDREN], _RELATION_OPTIONS[RelationType.DESCENDANTS])
-        )
-        return _result_with_issue(
-            NormalizationIssueCode.AMBIGUOUS_RELATION,
-            f"'{direction}'가 바로 연결된 한 단계인지 전체 경로인지 확인해 주세요.",
-            options=options,
-            rule_ids=(*rule_ids, "ambiguous_structural_relation"),
-        )
-    if len(raw_relation_values) > 1 or (raw_relation_values and related_tier is not None):
-        return _result_with_issue(
-            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-            "한 번에 서로 다른 위계 관계를 함께 요청했습니다. 확인할 관계를 하나만 선택해 주세요.",
-            options=(_RELATION_OPTIONS[value] for value in raw_relation_values[:3]),
-            rule_ids=(*rule_ids, "conflicting_relation_constraints"),
-        )
+    # A draft mention that may yet be dropped must not open relation detection;
+    # only a real target or the user's own unknown span does.
+    relation_selection, relation_issue = _resolve_relation(
+        raw_query,
+        accepted_constraints,
+        rule_ids,
+        has_target=bool(
+            target_ids or declared_unknown_mentions or (raw_reuse and active_previous)
+        ),
+        target_ids=target_ids,
+    )
+    if relation_issue is not None:
+        return relation_issue
+    assert relation_selection is not None
+    relation = relation_selection.relation
+    related_tier = relation_selection.related_tier
 
-    relation = raw_relation_values[0] if raw_relation_values else None
-    if relation is None and related_tier is None:
-        draft_relations: list[RelationType] = []
-        draft_relation_ambiguous = False
-        draft_related: list[HierarchyTier] = []
-        for kind, text in accepted_constraints:
-            if kind != "relation":
-                continue
-            values, ambiguous = _relation_values(text)
-            draft_relations.extend(values)
-            draft_relation_ambiguous = draft_relation_ambiguous or ambiguous
-            value = _related_tier_value(text)
-            if value is not None:
-                draft_related.append(value)
-        draft_relations = list(dict.fromkeys(draft_relations))
-        draft_related = list(dict.fromkeys(draft_related))
-        if draft_relation_ambiguous and not draft_relations:
-            return _result_with_issue(
-                NormalizationIssueCode.AMBIGUOUS_RELATION,
-                "바로 연결된 항목을 볼지 전체 상·하위 경로를 볼지 확인해 주세요.",
-                options=(
-                    _RELATION_OPTIONS[RelationType.PARENT],
-                    _RELATION_OPTIONS[RelationType.ANCESTORS],
-                    _RELATION_OPTIONS[RelationType.CHILDREN],
-                ),
-                rule_ids=(*rule_ids, "ambiguous_structural_relation"),
-            )
-        if len(draft_relations) + len(draft_related) > 1:
-            return _result_with_issue(
-                NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-                "서로 다른 관계 조건이 함께 표시되어 있습니다. 확인할 관계를 하나만 선택해 주세요.",
-                options=(_RELATION_OPTIONS[value] for value in draft_relations[:3]),
-                rule_ids=(*rule_ids, "conflicting_relation_constraints"),
-            )
-        relation = draft_relations[0] if draft_relations else None
-        related_tier = draft_related[0] if draft_related else None
-
-    target_tier_mentions = _tier_values(raw_query) if target_ids else []
-    if (
-        target_ids
-        and relation is None
-        and related_tier is None
-        and target_tier_mentions
-        and re.search(r"(?:최하위|상위|중위|하위)\s*요인", _flexible_surface_text(raw_query))
-    ):
-        tier_labels = ", ".join(TIER_LABELS[tier] for tier in target_tier_mentions)
-        return _result_with_issue(
-            NormalizationIssueCode.AMBIGUOUS_RELATION,
-            f"{tier_labels}이(가) 지정한 역량과 관련된 단계인지 전체 검사 단계인지 확인해 주세요.",
-            options=(
-                NormalizationOption(label="지정 역량과 관련된 단계", description="대상 역량에서 연결되는 공식 단계"),
-                NormalizationOption(label=f"전체 {tier_labels}", description="필기 역량검사의 공식 단계 전체"),
-            ),
-            rule_ids=(*rule_ids, "target_official_tier_ambiguity"),
-        )
-
-    ambiguous_instrument_labels = _raw_ambiguous_instrument_labels(raw_query, snapshot)
-    if ambiguous_instrument_labels:
-        return _result_with_issue(
-            NormalizationIssueCode.AMBIGUOUS_SCOPE,
-            "같은 표기로 해석되는 등록 검사가 둘 이상입니다. 조회할 검사 범위를 선택해 주세요.",
-            options=(
-                NormalizationOption(label=label, description="현재 레지스트리의 등록 검사")
-                for label in ambiguous_instrument_labels[:3]
-            ),
-            rule_ids=(*rule_ids, "normalized_instrument_ambiguity"),
-        )
-    instrument_ids = _raw_instrument_ids(raw_query, snapshot)
-    raw_unknown_instruments = _raw_unknown_instruments(raw_query, snapshot)
-    if raw_unknown_instruments:
-        labels = _unique(str(item["instrument_label"]) for item in _items(snapshot))
-        return _result_with_issue(
-            NormalizationIssueCode.UNKNOWN_INSTRUMENT,
-            f"'{raw_unknown_instruments[0]}'은(는) 현재 등록된 검사 이름이 아닙니다. 검사 범위를 선택해 주세요.",
-            options=(
-                NormalizationOption(label=label, description="현재 등록된 검사")
-                for label in labels
-            ),
-            rule_ids=(*rule_ids, "unknown_instrument"),
-        )
-    unknown_instruments: list[str] = []
-    if not instrument_ids:
-        for kind, text in accepted_constraints:
-            if kind != "instrument":
-                continue
-            if not _looks_like_instrument_expression(text):
-                continue
-            resolved = _instrument_ids_for_text(text, snapshot)
-            if resolved:
-                instrument_ids.extend(resolved)
-            else:
-                unknown_instruments.append(text)
-    instrument_ids = _unique(instrument_ids)
-    if unknown_instruments:
-        labels = _unique(str(item["instrument_label"]) for item in _items(snapshot))
-        return _result_with_issue(
-            NormalizationIssueCode.UNKNOWN_INSTRUMENT,
-            f"'{unknown_instruments[0]}'은(는) 현재 등록된 검사 이름이 아닙니다. 검사 범위를 선택해 주세요.",
-            options=(
-                NormalizationOption(label=label, description="현재 등록된 검사")
-                for label in labels
-            ),
-            rule_ids=(*rule_ids, "unknown_instrument"),
-        )
-    instrument_surfaces: list[str] = []
-    for instrument_id in instrument_ids:
-        instrument_surfaces.extend((instrument_id, str(_instrument_catalog(snapshot)[0][instrument_id])))
-        if instrument_id == WRITTEN_INSTRUMENT_ID:
-            instrument_surfaces.extend(("필기", "필기검사", "필기 역량검사"))
-        elif instrument_id == VIDEO_INSTRUMENT_ID:
-            instrument_surfaces.extend(("영상", "영상면접"))
-    if instrument_ids and _has_explicitly_negated_mention(raw_query, instrument_surfaces):
-        by_id, _ = _instrument_catalog(snapshot)
-        return _result_with_issue(
-            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-            "제외할 검사와 조회할 검사 표현이 함께 있습니다. 실제로 포함할 검사 범위를 선택해 주세요.",
-            options=(
-                NormalizationOption(label=str(by_id[instrument_id]), description="조회에 포함할 등록 검사")
-                for instrument_id in instrument_ids[:3]
-            ),
-            rule_ids=(*rule_ids, "negated_instrument_scope"),
-        )
+    instrument_ids, instrument_issue = _resolve_instruments(
+        raw_query, snapshot, accepted_constraints, rule_ids
+    )
+    if instrument_issue is not None:
+        return instrument_issue
+    assert instrument_ids is not None
 
     hierarchy_tiers: list[HierarchyTier] = []
     if relation is None and related_tier is None and not target_ids:
@@ -2006,7 +2246,10 @@ def normalize_registry_query(
     raw_intent = _intent_from_raw(
         raw_query,
         has_targets=bool(target_ids),
-        has_unknown_targets=bool(unknown_mentions),
+        # Only a raw-query unknown may force an item lookup.  A draft mention
+        # that is about to be dropped would otherwise turn a catalog question
+        # into a lookup for a name nobody asked about.
+        has_unknown_targets=bool(declared_unknown_mentions),
         has_relation=relation is not None or related_tier is not None,
     )
     if raw_intent is None and hierarchy_tiers:
@@ -2029,14 +2272,47 @@ def normalize_registry_query(
 
     semantic_description = _clean_public_mention(draft_data.get("semantic_description"))
     grounded_semantic_query = _grounded_semantic_query(raw_query, semantic_description)
-    if unknown_mentions:
+    if declared_unknown_mentions:
+        # A described behaviour is a stronger signal than spelling proximity,
+        # so the semantic route keeps precedence over any suggestion.
         if grounded_semantic_query is not None:
             return _result_with_semantic_request(
                 grounded_semantic_query,
-                unknown_mentions,
+                declared_unknown_mentions,
                 (*rule_ids, "unknown_target_semantic_request"),
             )
-        return _result_with_unregistered(unknown_mentions, (*rule_ids, "unregistered_target"))
+        near_names = _near_registered_names(declared_unknown_mentions[0], snapshot)
+        if near_names:
+            return _result_with_near_match(
+                declared_unknown_mentions[0],
+                near_names,
+                (*rule_ids, "near_match_suggestion"),
+            )
+        return _result_with_unregistered(
+            declared_unknown_mentions,
+            (*rule_ids, "unregistered_target"),
+        )
+    if incidental_draft_mentions:
+        # An incidental mention never declares a name unregistered.  It is a
+        # hint that missed: offered as a correction when it is close to a
+        # registered name, dropped otherwise.  Promoting it to a rejection is
+        # what made "역량 목록 좀 알려줘" fail, because the entry model copies
+        # scope nouns into target_mentions.
+        if grounded_semantic_query is not None:
+            return _result_with_semantic_request(
+                grounded_semantic_query,
+                incidental_draft_mentions,
+                (*rule_ids, "unknown_target_semantic_request"),
+            )
+        for mention in incidental_draft_mentions:
+            near_names = _near_registered_names(mention, snapshot)
+            if near_names:
+                return _result_with_near_match(
+                    mention,
+                    near_names,
+                    (*rule_ids, "near_match_suggestion"),
+                )
+        rule_ids.append("draft_mention_dropped")
     if intent == QueryIntent.SEMANTIC_SEARCH and not target_ids:
         if grounded_semantic_query is None:
             return _result_with_issue(
@@ -2083,72 +2359,10 @@ def normalize_registry_query(
                     break
     group_by = group_by or GroupBy.NONE
 
-    normalized_raw = _flexible_surface_text(raw_query)
-    unsupported_negated_filters = (
-        "루트 항목",
-        "최상위 항목",
-        "말단 항목",
-        "리프 항목",
-        "부모가 있는 항목",
-        "상위 항목이 있는 항목",
-        "자식이 있는 항목",
-        "하위 항목이 있는 항목",
-        "정의가 있는 항목",
-        "정의가 없는 항목",
-    )
-    if _has_explicitly_negated_mention(raw_query, unsupported_negated_filters):
-        return _result_with_issue(
-            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-            "제외할 필터와 조회할 범위가 함께 있습니다. 해당 조건을 포함할지 제외할지 선택해 주세요.",
-            options=(
-                NormalizationOption(label="조건 포함", description="표시한 조건에 맞는 항목만 조회"),
-                NormalizationOption(label="조건 제외", description="표시한 조건을 제외한 범위를 다시 지정"),
-            ),
-            rule_ids=(*rule_ids, "negated_filter_scope"),
-        )
-    root_only = bool(re.search(r"(?:루트|최상위)\s*항목", normalized_raw))
-    leaf_only = bool(re.search(r"(?:말단|리프)\s*항목", normalized_raw))
-    filter_flags, definition_statuses = _filter_mentions(raw_query)
-    for kind, text in accepted_constraints:
-        if kind != "filter":
-            continue
-        root_only = root_only or bool(re.search(r"루트|최상위", text))
-        leaf_only = leaf_only or bool(re.search(r"말단|리프", text))
-        mentioned_flags, mentioned_statuses = _filter_mentions(text)
-        for flag, values in mentioned_flags.items():
-            filter_flags[flag].update(values)
-        definition_statuses.extend(mentioned_statuses)
-    if root_only and leaf_only:
-        return _result_with_issue(
-            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-            "루트 항목과 말단 항목 조건을 동시에 적용할 수 없습니다. 하나를 선택해 주세요.",
-            options=(
-                NormalizationOption(label="루트 항목", description="등록된 부모가 없는 항목"),
-                NormalizationOption(label="말단 항목", description="등록된 자식이 없는 항목"),
-            ),
-            rule_ids=(*rule_ids, "conflicting_root_leaf"),
-        )
-    conflicting_filter = next(
-        (flag for flag, values in filter_flags.items() if len(values) > 1),
-        None,
-    )
-    if conflicting_filter is not None:
-        labels = {
-            "has_parent": "부모 존재",
-            "has_children": "자식 존재",
-            "analysis_included": "분석 포함",
-        }
-        label = labels[conflicting_filter]
-        return _result_with_issue(
-            NormalizationIssueCode.CONFLICTING_CONSTRAINTS,
-            f"{label} 조건이 서로 반대입니다. 포함과 제외 중 하나를 선택해 주세요.",
-            options=(
-                NormalizationOption(label=f"{label}: 예", description="조건을 충족하는 항목"),
-                NormalizationOption(label=f"{label}: 아니요", description="조건을 충족하지 않는 항목"),
-            ),
-            rule_ids=(*rule_ids, "conflicting_boolean_filter"),
-        )
-    definition_statuses = _unique(definition_statuses)
+    filters, filter_issue = _resolve_filters(raw_query, accepted_constraints, rule_ids)
+    if filter_issue is not None:
+        return filter_issue
+    assert filters is not None
 
     # Exact registry names always beat a semantic-search hint.
     if target_ids and intent == QueryIntent.SEMANTIC_SEARCH:
@@ -2162,18 +2376,18 @@ def normalize_registry_query(
     parsed = ParsedRegistryQuery(
         intent=intent,
         target_names=target_names,
-        instrument_labels=instrument_ids,
+        instrument_refs=instrument_ids,
         node_types=_unique(node_types),
         hierarchy_tiers=hierarchy_tiers,
         relation=relation,
         related_tier=related_tier,
         fields=fields,
-        root_only=root_only,
-        leaf_only=leaf_only,
-        has_parent=next(iter(filter_flags["has_parent"]), None),
-        has_children=next(iter(filter_flags["has_children"]), None),
-        analysis_included=next(iter(filter_flags["analysis_included"]), None),
-        definition_statuses=definition_statuses,
+        root_only=filters.root_only,
+        leaf_only=filters.leaf_only,
+        has_parent=next(iter(filters.flags["has_parent"]), None),
+        has_children=next(iter(filters.flags["has_children"]), None),
+        analysis_included=next(iter(filters.flags["analysis_included"]), None),
+        definition_statuses=filters.definition_statuses,
         group_by=group_by,
         scope=QueryScope.PREVIOUS_RESULT if reuse_previous else scope,
         reuse_previous_result=reuse_previous,

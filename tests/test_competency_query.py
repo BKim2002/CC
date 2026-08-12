@@ -478,7 +478,7 @@ def test_video_never_receives_written_tier_filter() -> None:
     snapshot = _snapshot()
     parsed = ParsedRegistryQuery(
         intent=QueryIntent.CATALOG_QUERY,
-        instrument_labels=["영상면접"],
+        instrument_refs=["영상면접"],
         hierarchy_tiers=[HierarchyTier.UPPER],
     )
     validated = validate_parsed_query(parsed, snapshot)
@@ -522,7 +522,7 @@ def test_parsed_query_canonicalizes_alias_and_deduplicates_stable_ids() -> None:
     "parsed, previous",
     [
         (ParsedRegistryQuery(intent=QueryIntent.ITEM_LOOKUP, target_names=["없는 이름"]), None),
-        (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, instrument_labels=["없는 검사"]), None),
+        (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, instrument_refs=["없는 검사"]), None),
         (ParsedRegistryQuery(intent=QueryIntent.CATALOG_QUERY, node_types=["없는 레벨"]), None),
         (ParsedRegistryQuery(intent=QueryIntent.RELATION_QUERY, relation=RelationType.PARENT), None),
         (ParsedRegistryQuery(intent=QueryIntent.COMPARISON_QUERY, target_names=["전략성"]), None),
@@ -2298,3 +2298,286 @@ def test_six_registered_node_levels_render_without_level_hardcoding() -> None:
     context = build_grounded_answer_context(plan, execute_registry_query(plan, expanded), expanded)
     assert context.hierarchy_text is not None
     assert all(f"6단계 노드 {depth}" in context.hierarchy_text for depth in range(1, 7))
+
+
+# ---------------------------------------------------------------------------
+# Near-match suggestions for mentions that resolve to nothing
+# ---------------------------------------------------------------------------
+
+# One syllable swapped for a visually and phonetically close one, the shape of
+# an ordinary Korean typo.
+_TYPO_SYLLABLES = {
+    "성": "셩",
+    "력": "렵",
+    "도": "됴",
+    "구": "규",
+    "측": "책",
+    "수": "슈",
+    "능": "늠",
+    "매": "맹",
+    "통": "툥",
+    "화": "홰",
+}
+
+
+def _one_syllable_typo(name: str) -> str | None:
+    for index, char in enumerate(name):
+        if char in _TYPO_SYLLABLES:
+            return name[:index] + _TYPO_SYLLABLES[char] + name[index + 1 :]
+    return None
+
+
+@pytest.mark.parametrize(
+    ("mention", "expected"),
+    [
+        ("공감셩", "공감성"),
+        ("분석렵", "분석력"),
+        ("전략썽", "전략성"),
+        ("전략", "전략성"),
+    ],
+)
+def test_near_match_recovers_a_mistyped_registered_name(
+    mention: str,
+    expected: str,
+) -> None:
+    assert expected in competency_query._near_registered_names(mention, _snapshot())
+
+
+@pytest.mark.parametrize(
+    "mention",
+    ["그릿", "역량 목록", "전체 역량 목록", "위계 구조", "오늘 날씨"],
+)
+def test_near_match_stays_silent_for_non_names(mention: str) -> None:
+    assert competency_query._near_registered_names(mention, _snapshot()) == []
+
+
+@pytest.mark.parametrize("mention", ["", "성", "력"])
+def test_near_match_ignores_mentions_below_the_length_floor(mention: str) -> None:
+    # A single syllable is close to far too much of the registry to be a signal.
+    assert competency_query._near_registered_names(mention, _snapshot()) == []
+
+
+def test_near_match_caps_the_candidate_count() -> None:
+    # "공감성 하위" is close to three siblings plus their parent.
+    candidates = competency_query._near_registered_names("공감성 하위", _snapshot())
+
+    assert 0 < len(candidates) <= competency_query.MAX_NEAR_MATCH_CANDIDATES
+
+
+def test_near_match_reports_canonical_names_and_deduplicates_by_item() -> None:
+    snapshot = _snapshot()
+    # "종합점수" is an alias of "역검 종합점수"; both labels point at one item.
+    candidates = competency_query._near_registered_names("종합점슈", snapshot)
+
+    assert "역검 종합점수" in candidates
+    assert "종합점수" not in candidates
+    assert len(candidates) == len(set(candidates))
+
+
+def test_every_registered_name_survives_a_single_syllable_typo() -> None:
+    """The registry has near-identical sibling names by design.
+
+    They collide with each other far above the cutoff, which is harmless: a
+    label that resolves exactly never reaches near-matching.  What has to hold
+    is that a typo still recovers the name it was typed from.
+    """
+
+    snapshot = _snapshot()
+    missed: list[tuple[str, str, list[str]]] = []
+    checked = 0
+    for name in snapshot.canonical_names:
+        typo = _one_syllable_typo(name)
+        if typo is None or typo in snapshot.lookup:
+            continue
+        checked += 1
+        candidates = competency_query._near_registered_names(typo, snapshot)
+        if name not in candidates:
+            missed.append((typo, name, candidates))
+
+    assert checked >= 50, "fixture should cover a production-sized registry"
+    assert missed == []
+
+
+def test_near_match_result_is_a_clarification_with_registered_options() -> None:
+    result = competency_query._result_with_near_match(
+        "공감셩", ["공감성"], ("near_match_suggestion",)
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert [option.label for option in result.issue.options] == ["공감성"]
+    assert "공감셩" in result.issue.question
+    assert result.applied_rule_ids == ["near_match_suggestion"]
+
+
+def test_near_match_result_requires_at_least_one_candidate() -> None:
+    with pytest.raises(ValueError):
+        competency_query._result_with_near_match("공감셩", [], ())
+
+
+def test_mistyped_name_in_the_raw_query_gets_a_suggestion() -> None:
+    result = normalize_registry_query(
+        raw_query="공감셩이 뭐야?",
+        draft=_draft("item_lookup", target_mentions=["공감셩"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert "공감성" in [option.label for option in result.issue.options]
+    assert "near_match_suggestion" in result.applied_rule_ids
+
+
+@pytest.mark.parametrize(
+    "raw_query",
+    ["그릿이 뭐야?", "리더십이 뭐야?", "창의력의 정의를 알려줘"],
+)
+def test_unrelated_unknown_name_still_reports_unregistered(raw_query: str) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft("item_lookup"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+
+
+def test_unregistered_name_close_to_a_registered_one_is_offered_as_a_choice() -> None:
+    """A near miss need not be a typo to be worth suggesting.
+
+    "회복탄력성" is a real concept that is not in this registry, but it sits
+    close to the registered "회복성".  Offering that as a choice the user can
+    decline beats a dead end, so this is intended rather than a false positive.
+    """
+
+    result = normalize_registry_query(
+        raw_query="회복탄력성의 정의를 알려줘",
+        draft=_draft("item_lookup"),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert [option.label for option in result.issue.options] == ["회복성"]
+
+
+def test_described_behaviour_outranks_a_spelling_suggestion() -> None:
+    result = normalize_registry_query(
+        raw_query="공감셩이 뭐야? 팀원의 감정을 살피는 행동을 말하는 거야",
+        draft=_draft(
+            "semantic_search",
+            target_mentions=["공감셩"],
+            semantic_description="팀원의 감정을 살피는 행동",
+        ),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.SEMANTIC_CANDIDATES
+
+
+# The entry model copies the user's noun phrase into target_mentions.  Each of
+# these was rejected as an unregistered competency before the split between
+# declared and incidental mentions.
+_SCOPE_NOUN_COPIES = [
+    ("역량 목록 좀 알려줘", "catalog_query", "역량 목록", QueryIntent.CATALOG_QUERY),
+    ("역량 종류 좀 알려줘", "catalog_query", "역량 종류", QueryIntent.CATALOG_QUERY),
+    ("전체 역량 목록 좀 알려줘", "catalog_query", "전체 역량 목록", QueryIntent.CATALOG_QUERY),
+    ("등록된 역량 다 보여줘", "catalog_query", "등록된 역량", QueryIntent.CATALOG_QUERY),
+    ("어떤 역량들이 있어?", "catalog_query", "역량들", QueryIntent.CATALOG_QUERY),
+    ("역량 리스트 뽑아줘", "catalog_query", "역량 리스트", QueryIntent.CATALOG_QUERY),
+    ("위계 구조 알려줘", "hierarchy_query", "위계 구조", QueryIntent.HIERARCHY_QUERY),
+    ("역량 트리 보여줘", "hierarchy_query", "역량 트리", QueryIntent.HIERARCHY_QUERY),
+    ("검사별 역량 수 알려줘", "aggregate_query", "검사별 역량 수", QueryIntent.AGGREGATE_QUERY),
+    ("분석에 포함되는 역량만", "catalog_query", "분석에 포함되는 역량", QueryIntent.CATALOG_QUERY),
+]
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "intent_hint", "copied", "expected_intent"),
+    _SCOPE_NOUN_COPIES,
+    ids=[case[0] for case in _SCOPE_NOUN_COPIES],
+)
+def test_copied_scope_noun_does_not_become_an_unregistered_name(
+    raw_query: str,
+    intent_hint: str,
+    copied: str,
+    expected_intent: QueryIntent,
+) -> None:
+    result = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint, target_mentions=[copied]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.PLAN
+    assert result.plan is not None
+    assert result.plan.intent == expected_intent
+    assert "draft_mention_dropped" in result.applied_rule_ids
+
+
+@pytest.mark.parametrize(
+    ("raw_query", "intent_hint", "copied", "expected_intent"),
+    _SCOPE_NOUN_COPIES,
+    ids=[case[0] for case in _SCOPE_NOUN_COPIES],
+)
+def test_scope_questions_are_unaffected_by_whether_the_draft_copies_a_noun(
+    raw_query: str,
+    intent_hint: str,
+    copied: str,
+    expected_intent: QueryIntent,
+) -> None:
+    snapshot = _snapshot()
+    with_copy = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint, target_mentions=[copied]),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+    without_copy = normalize_registry_query(
+        raw_query=raw_query,
+        draft=_draft(intent_hint),
+        snapshot=snapshot,
+        previous_result_ids=[],
+    )
+
+    assert with_copy.plan == without_copy.plan
+
+
+def test_incidental_draft_mention_close_to_a_name_is_offered_as_a_correction() -> None:
+    # "공감셩 알려줘" carries no particle marking it as a target, so it lands in
+    # the incidental bucket - but it is still worth a suggestion.
+    result = normalize_registry_query(
+        raw_query="공감셩 알려줘",
+        draft=_draft("item_lookup", target_mentions=["공감셩"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.CLARIFICATION
+    assert result.issue is not None
+    assert result.issue.code == NormalizationIssueCode.NEAR_MATCH_TARGET
+    assert "공감성" in [option.label for option in result.issue.options]
+
+
+def test_explicitly_named_unknown_still_reports_unregistered_beside_a_known_name() -> None:
+    # A name the user marked as a target keeps its authority even though it
+    # arrived through the draft; only incidental mentions are droppable.
+    result = normalize_registry_query(
+        raw_query="전략성, 정의감의 정의",
+        draft=_draft("item_lookup", target_mentions=["전략성", "정의감"]),
+        snapshot=_snapshot(),
+        previous_result_ids=[],
+    )
+
+    assert result.outcome == NormalizationOutcome.UNREGISTERED_TARGET
+    assert result.unregistered_target is not None
+    assert result.unregistered_target.target_mentions == ["정의감"]
+    assert "draft_mention_dropped" not in result.applied_rule_ids

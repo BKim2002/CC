@@ -232,6 +232,10 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 
 정확한 이름 입력도 예외 없이 `START → llm_gateway → validate_gateway_decision`을 거친다. Gateway는 `registry_query`, `meta_conversation`, `out_of_scope` 중 하나와 작은 초안만 만들며 사용자 답변이나 최종 query plan을 쓰지 않는다. Query Normalizer가 사용자 원문과 초안을 대조하고, 이름 검증·목록 필터·관계 탐색·개수 계산·비교 사실 구성은 Python이 active registry와 stable ID로 수행한다. 역량처럼 보이는 미등록 이름은 일반 지식으로 설명하지 않고 미등록 대상으로 안내한다.
 
+레지스트리에서 해석되지 않은 표현은 사용자가 얼마나 강하게 단언했는지로 갈라 처리한다. 사용자 원문에서 직접 뽑혔거나 조사로 대상임을 표시한 표현은 **declared**로 보고, 근접한 등록명이 있으면 후보를 제시하고 없으면 미등록 대상으로 안내한다. 다른 대상이 없어 남은 초안 표현은 **incidental**로 보고, 근접한 등록명이 있으면 후보를 제시하고 없으면 버린 뒤 원문 해석을 계속한다. `역량 목록 좀 알려줘`처럼 Gateway가 범위 명사를 target으로 복사해도 목록 질문이 미등록 안내로 바뀌지 않는 이유다.
+
+근접 후보는 정식명과 별칭 전체를 대상으로 찾고, 정식명 기준으로 최대 3개까지 제시한다. `공감셩` 같은 한 음절 오타는 `공감성`을 되찾는다. 형제 이름이 서로 매우 유사한 레지스트리에서도 안전한데, 정확히 입력된 라벨은 근접 매칭에 도달하기 전에 해석되기 때문이다.
+
 레지스트리 결과·후보·역량 관련 재질문은 Registry Writer가, 인사·소개·도움말·미지원 범위는 Scope Writer가 담당한다. 활용 제안은 `[등록 정보]`와 `[일반 활용 제안]`을 분리하고 등록 정보 섹션에 기존 grounding 검증을 그대로 적용한다. 정의는 레지스트리 원문을 유지한다.
 
 범위 밖 질문은 LLM을 호출하지 않고 `scope_template`으로 답한다. 출력 중 모델에서 온 텍스트는 `sanitize_topic_summary`가 짧은 명사구 또는 고정 category 라벨로 줄인 주제 요약 하나뿐이며, 나머지 문장은 전부 고정 템플릿이다. 안내 문장이 매번 같아 보이지 않도록 registry redirect는 4종을 두고 턴 번호로 회전한다. 결정적 출력을 요청 경로에서 다시 검증하지 않는 대신, 모든 category·언어·variant 조합이 Scope Writer와 동일한 계약을 만족함을 `tests/test_scope_response.py`가 고정한다.
@@ -334,6 +338,7 @@ python -m pytest -q
 - 정확한 역량 질문과 체크포인트 기록
 - 정확한 이름을 포함한 모든 입력의 Gateway 우선 처리와 직접 질의·Scope 안내 2회/의미 검색 3회 호출 상한
 - Gateway 초안과 사용자 원문을 active registry에 대조하는 Query Normalizer의 plan·clarification·semantic candidate·미등록 대상 분기
+- 복사된 범위 명사를 미등록 대상으로 승격하지 않는 declared/incidental 구분과, 오타에 대한 근접 등록명 제안(정식명 62개 전체의 한 음절 오타 복원 포함)
 - 전체·검사별·공식 단계별 목록과 동적 집계
 - 임의 깊이·복수 root·가상 상위 라벨의 전체/부분 위계
 - 부모·조상·자식·후손·형제 관계와 registry-backed 비교
@@ -372,7 +377,7 @@ python -m pytest -q
 - PostgreSQL에는 사용자의 질문과 챗봇 답변이 저장된다.
 - 같은 프로세스에서는 같은 대화의 동시 요청을 직렬화한다. 여러 프로세스·인스턴스에 걸친 동시 실행 제어는 지원하지 않는다.
 - 브라우저에는 API 키, DB 경로, 시스템 프롬프트, 전체 LangGraph 내부 상태를 전달하지 않는다.
-- 프로세스별 안전 집계는 `runtime_metric_snapshot()`과 `runtime_metric` 로그로 확인할 수 있다. Gateway route, normalizer rule/issue, Registry fallback(응답 모드별), Scope 템플릿(category별), meta Scope Writer의 첫 실패·재시도·fallback, fixed failure와 경로별 호출 수만 기록하며 원문 질문·정의·prompt·URL·예외 전문은 기록하지 않는다.
+- 프로세스별 안전 집계는 `runtime_metric_snapshot()`과 `runtime_metric` 로그로 확인할 수 있다. Gateway route, normalizer rule/issue(`near_match_target`, `draft_mention_dropped` 포함), Registry fallback(응답 모드별), Scope 템플릿(category별), meta Scope Writer의 첫 실패·재시도·fallback, fixed failure와 경로별 호출 수만 기록하며 원문 질문·정의·prompt·URL·예외 전문은 기록하지 않는다.
 
 ## 수동 확인 항목
 
