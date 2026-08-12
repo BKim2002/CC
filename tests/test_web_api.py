@@ -892,13 +892,17 @@ def test_meta_request_is_gateway_first_and_uses_buffered_scope_writer(
     assert state["messages"][-1].content == done["answer"]
 
 
-def test_scope_primary_sse_matches_non_stream_and_checkpoint_history(
+def test_out_of_scope_template_sse_matches_non_stream_and_checkpoint_history(
     client: TestClient,
 ) -> None:
+    # Out-of-scope answers come from a template, so the exact public string is
+    # pinned here; the Gateway is the only model call in the turn.
     expected = (
-        "서울 날씨 요청을 확인하고 싶으시군요. "
-        "이 챗봇은 등록된 역량 정보만 다루므로 날씨를 직접 확인하지 않습니다. "
-        "대신 등록 역량의 정의나 위계를 물어보세요."
+        "서울 날씨에 관해 궁금하신 점을 이해했습니다. "
+        "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 답하거나 "
+        "판단하지 않습니다. "
+        "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 후보를 "
+        "찾아볼 수 있습니다."
     )
     stream_thread_id = create_thread(client)
 
@@ -923,15 +927,13 @@ def test_scope_primary_sse_matches_non_stream_and_checkpoint_history(
         "answer": expected,
         "candidates": [],
     }
-    assert state["response_mode"] == "llm"
-    assert state["scope_writer_attempts"] == 1
+    assert state["response_mode"] == "scope_template"
+    assert state["scope_writer_attempts"] == 0
+    assert state["llm_call_count"] == 1
     assert state["messages"][-1].content == expected
     assert history["messages"][-1]["content"] == expected
     assert history["candidates"] == []
-    assert client.model_calls == [  # type: ignore[attr-defined]
-        "gateway",
-        "scope_writer",
-    ]
+    assert client.model_calls == ["gateway"]  # type: ignore[attr-defined]
 
     non_stream_thread_id = create_thread(client)
     non_stream = client.post(
@@ -950,20 +952,19 @@ def test_scope_primary_sse_matches_non_stream_and_checkpoint_history(
 def test_scope_fallback_sse_is_safe_and_byte_identical_across_api_surfaces(
     client: TestClient,
 ) -> None:
+    # Meta turns are the only ones that still generate, so this is where a
+    # rejected draft must degrade to the deterministic fallback.
     scope_writer: ScopeWriterStub = client.scope_writer  # type: ignore[attr-defined]
     scope_writer.force_invalid = True
     expected = (
-        "서울 날씨에 관해 궁금하신 점을 이해했습니다. "
-        "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 답하거나 "
-        "판단하지 않습니다. "
-        "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 후보를 "
-        "찾아볼 수 있습니다."
+        "안녕하세요, 반갑습니다. "
+        "등록된 역량명을 묻거나 행동 특징을 설명해 역량 후보를 찾아보세요."
     )
     stream_thread_id = create_thread(client)
 
     response = client.post(
         "/api/chat/stream",
-        json={"message": "서울 날씨 알려줘", "thread_id": stream_thread_id},
+        json={"message": "안녕하세요", "thread_id": stream_thread_id},
     )
     events = parse_sse_events(response.text)
     event_names = [event for event, _ in events]
@@ -998,7 +999,7 @@ def test_scope_fallback_sse_is_safe_and_byte_identical_across_api_surfaces(
     non_stream_thread_id = create_thread(client)
     non_stream = client.post(
         "/api/chat",
-        json={"message": "서울 날씨 알려줘", "thread_id": non_stream_thread_id},
+        json={"message": "안녕하세요", "thread_id": non_stream_thread_id},
     ).json()
     non_stream_history = client.get(
         f"/api/threads/{non_stream_thread_id}/messages"

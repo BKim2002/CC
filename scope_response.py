@@ -1237,42 +1237,119 @@ def validate_registry_scope_note(text: str, *, category: str, summary: str) -> b
     )
 
 
+# The out-of-scope answer is a template, so a single fixed redirect would make
+# every such turn read identically.  Each variant is held to the same
+# ``_redirect_shape_is_safe`` and ``is_registry_redirect`` contract the writer
+# had to meet, which ``test_scope_response`` asserts for all of them.
+OUT_OF_SCOPE_REDIRECTS_KO: tuple[str, ...] = (
+    "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 후보를 찾아볼 수 있습니다",
+    "대신 등록 역량의 정의나 부모·자식 관계를 조회할 수 있습니다",
+    "원하시면 등록 역량 목록이나 검사 유형의 집계를 살펴볼 수 있습니다",
+    "관심 있는 행동 특징을 설명해 주시면 관련된 등록 역량 후보를 찾아볼 수 있습니다",
+)
+OUT_OF_SCOPE_REDIRECTS_EN: tuple[str, ...] = (
+    "You can instead ask for a registered competency definition, hierarchy, "
+    "relationship, or behavior-based candidate",
+    "You can ask how a registered competency and its parent or child relate",
+    "Instead, you can ask for the registered competency hierarchy or a comparison",
+    "You can describe a behavior to find related registered competencies",
+)
+REDIRECT_VARIANT_COUNT = len(OUT_OF_SCOPE_REDIRECTS_KO)
+
+
+def out_of_scope_redirect(variant: int, *, english: bool) -> str:
+    """Pick one redirect deterministically; the caller owns the variant index."""
+
+    variants = OUT_OF_SCOPE_REDIRECTS_EN if english else OUT_OF_SCOPE_REDIRECTS_KO
+    return variants[variant % len(variants)]
+
+
+def out_of_scope_draft(
+    *,
+    category: str,
+    summary: str,
+    raw_query: str,
+    variant: int = 0,
+) -> OutOfScopeResponseDraft:
+    """Build the out-of-scope answer parts without calling a model.
+
+    ``sanitize_topic_summary`` is the only place model-derived text enters, and
+    it reduces that text to a short noun phrase or a fixed category label.
+    """
+
+    english = prefers_english(raw_query)
+    if category not in SCOPE_CATEGORIES:
+        category = "other"
+    safe_summary = sanitize_topic_summary(summary, category, english=english)
+    if english:
+        return OutOfScopeResponseDraft(
+            acknowledgement=f"I understand that you're asking about {safe_summary}",
+            scope_boundary=(
+                "This chat is limited to registered competency information and "
+                "does not answer that request directly"
+            ),
+            registry_redirect=out_of_scope_redirect(variant, english=True),
+        )
+    return OutOfScopeResponseDraft(
+        acknowledgement=f"{safe_summary}에 관해 궁금하신 점을 이해했습니다",
+        scope_boundary=(
+            "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 "
+            "답하거나 판단하지 않습니다"
+        ),
+        registry_redirect=out_of_scope_redirect(variant, english=False),
+    )
+
+
+def scope_template_answer(
+    *,
+    category: str,
+    summary: str,
+    raw_query: str,
+    variant: int = 0,
+) -> str:
+    """Render the complete out-of-scope answer as one publishable string.
+
+    This is a normal response path rather than a recovery path, so it is not
+    re-validated at request time.  ``test_scope_response`` proves every
+    category, language and variant satisfies ``validate_scope_draft`` instead.
+    """
+
+    draft = out_of_scope_draft(
+        category=category,
+        summary=summary,
+        raw_query=raw_query,
+        variant=variant,
+    )
+    return " ".join(
+        (
+            _ensure_sentence(draft.acknowledgement),
+            _ensure_sentence(draft.scope_boundary),
+            _ensure_sentence(draft.registry_redirect),
+        )
+    )
+
+
 def scope_fallback_draft(
     *,
     mode: str,
     category: str,
     summary: str,
     raw_query: str,
+    variant: int = 0,
 ) -> OutOfScopeResponseDraft | MetaResponseDraft:
-    """Build the only deterministic prose path after Scope Writer exhaustion."""
+    """Build the deterministic prose for a scope turn.
+
+    Out-of-scope now uses this as its normal path; the meta modes still use it
+    only after the Scope Writer is exhausted.
+    """
 
     english = prefers_english(raw_query)
     if mode == "out_of_scope":
-        if category not in SCOPE_CATEGORIES:
-            category = "other"
-        safe_summary = sanitize_topic_summary(summary, category, english=english)
-        if english:
-            return OutOfScopeResponseDraft(
-                acknowledgement=f"I understand that you're asking about {safe_summary}",
-                scope_boundary=(
-                    "This chat is limited to registered competency information and "
-                    "does not answer that request directly"
-                ),
-                registry_redirect=(
-                    "You can instead ask for a registered competency definition, "
-                    "hierarchy, relationship, or behavior-based candidate"
-                ),
-            )
-        return OutOfScopeResponseDraft(
-            acknowledgement=f"{safe_summary}에 관해 궁금하신 점을 이해했습니다",
-            scope_boundary=(
-                "이 챗봇은 등록된 역량 정보만 다루므로 해당 요청의 내용을 직접 "
-                "답하거나 판단하지 않습니다"
-            ),
-            registry_redirect=(
-                "대신 등록 역량의 정의·위계·관계를 물어보거나 행동 특징으로 역량 "
-                "후보를 찾아볼 수 있습니다"
-            ),
+        return out_of_scope_draft(
+            category=category,
+            summary=summary,
+            raw_query=raw_query,
+            variant=variant,
         )
 
     if english:

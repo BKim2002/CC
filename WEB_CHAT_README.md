@@ -11,7 +11,7 @@
 - `static/chat.js`: 대화 생성·SSE 스트리밍·복원과 후보 버튼 처리
 - `competency_query.py`: Gateway 초안을 active registry와 stable ID로 정규화하는 Query Normalizer, 목록·위계·관계·집계·비교 엔진과 grounding 검증
 - `llm_gateway.py`: 세 가지 strict Gateway route, Scope 응답 계약, 단일 capability manifest, 역할별 모델 설정과 턴당 호출 예산
-- `scope_response.py`: 미지원·메타 대화의 필드별 안전성 검증, topic-aware 결정적 fallback, 공개 문자열 정규화
+- `scope_response.py`: 범위 밖 응답 템플릿과 redirect 회전, 메타 대화의 필드별 안전성 검증, 결정적 fallback, 공개 문자열 정규화
 - `competency_interpreter.py`: Gateway → Query Normalizer/Scope Writer로 분기하는 Registry-first LangGraph, 활성 레지스트리 스냅샷, PostgreSQL 체크포인터
 - `competency_registry.py`: PostgreSQL 활성 레지스트리의 검증·인덱스 생성
 - `scripts/setup_checkpoint_database.py`: LangGraph 체크포인트 테이블 준비
@@ -232,7 +232,11 @@ python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --workers 1
 
 정확한 이름 입력도 예외 없이 `START → llm_gateway → validate_gateway_decision`을 거친다. Gateway는 `registry_query`, `meta_conversation`, `out_of_scope` 중 하나와 작은 초안만 만들며 사용자 답변이나 최종 query plan을 쓰지 않는다. Query Normalizer가 사용자 원문과 초안을 대조하고, 이름 검증·목록 필터·관계 탐색·개수 계산·비교 사실 구성은 Python이 active registry와 stable ID로 수행한다. 역량처럼 보이는 미등록 이름은 일반 지식으로 설명하지 않고 미등록 대상으로 안내한다.
 
-레지스트리 결과·후보·역량 관련 재질문은 Registry Writer가, 인사·소개·도움말·미지원 범위는 Scope Writer가 담당한다. 활용 제안은 `[등록 정보]`와 `[일반 활용 제안]`을 분리하고 등록 정보 섹션에 기존 grounding 검증을 그대로 적용한다. 정의는 레지스트리 원문을 유지한다. 두 Writer의 정상 응답 실패는 모두 결정적 복구로 끝난다. Registry Writer가 검증을 통과하지 못하면 같은 grounding context로 렌더링한 답변을 `registry_fallback`으로 공개하고, Scope Writer의 범위 안내 실패는 category·언어를 보존한 `scope_fallback`으로 복구한다. 공통 고정 장애 안내는 Gateway 자체 실패, grounding context 구성 실패, checkpoint 실패처럼 결정적 복구조차 불가능한 실제 시스템 실패에만 쓴다.
+레지스트리 결과·후보·역량 관련 재질문은 Registry Writer가, 인사·소개·도움말·미지원 범위는 Scope Writer가 담당한다. 활용 제안은 `[등록 정보]`와 `[일반 활용 제안]`을 분리하고 등록 정보 섹션에 기존 grounding 검증을 그대로 적용한다. 정의는 레지스트리 원문을 유지한다.
+
+범위 밖 질문은 LLM을 호출하지 않고 `scope_template`으로 답한다. 출력 중 모델에서 온 텍스트는 `sanitize_topic_summary`가 짧은 명사구 또는 고정 category 라벨로 줄인 주제 요약 하나뿐이며, 나머지 문장은 전부 고정 템플릿이다. 안내 문장이 매번 같아 보이지 않도록 registry redirect는 4종을 두고 턴 번호로 회전한다. 결정적 출력을 요청 경로에서 다시 검증하지 않는 대신, 모든 category·언어·variant 조합이 Scope Writer와 동일한 계약을 만족함을 `tests/test_scope_response.py`가 고정한다.
+
+인사·감사·작별·챗봇 소개·기능 안내의 `meta_conversation`은 계속 Scope Writer가 생성한다. 두 Writer의 정상 응답 실패는 모두 결정적 복구로 끝난다. Registry Writer가 검증을 통과하지 못하면 같은 grounding context로 렌더링한 답변을 `registry_fallback`으로, Scope Writer가 실패하면 `scope_fallback`으로 공개한다. 공통 고정 장애 안내는 Gateway 자체 실패, grounding context 구성 실패, checkpoint 실패처럼 결정적 복구조차 불가능한 실제 시스템 실패에만 쓴다.
 
 ## 채팅 API와 스트리밍
 
@@ -352,7 +356,7 @@ python -m pytest -q
 - 런타임 레지스트리의 프로세스당 1회 로드와 재초기화
 - 공개 정적 파일의 비밀정보 비노출
 - 내부 오류 응답의 경로·예외 정보 비노출
-- Registry/Scope Writer의 검증 전 delta 차단, Registry 검증 실패 후 `registry_fallback` 복구와 grounding context 부재 시의 고정 장애, Scope 재시도·topic-aware fallback·취소, SSE event 순서·한국어 chunk 경계·최종 history 일치
+- Registry/Scope Writer의 검증 전 delta 차단, Registry 검증 실패 후 `registry_fallback` 복구와 grounding context 부재 시의 고정 장애, 범위 밖 템플릿의 무호출·redirect 회전·적대적 요약 무해화, meta Scope Writer의 재시도·fallback·취소, SSE event 순서·한국어 chunk 경계·최종 history 일치
 - Node.js에서 실행하는 브라우저 SSE parser·한 말풍선 동기화·후보·중복 전송·새 대화 실패 복원·안전한 `textContent` 렌더링
 - 같은 thread 직렬화와 서로 다른 thread 병렬 실행
 
@@ -368,7 +372,7 @@ python -m pytest -q
 - PostgreSQL에는 사용자의 질문과 챗봇 답변이 저장된다.
 - 같은 프로세스에서는 같은 대화의 동시 요청을 직렬화한다. 여러 프로세스·인스턴스에 걸친 동시 실행 제어는 지원하지 않는다.
 - 브라우저에는 API 키, DB 경로, 시스템 프롬프트, 전체 LangGraph 내부 상태를 전달하지 않는다.
-- 프로세스별 안전 집계는 `runtime_metric_snapshot()`과 `runtime_metric` 로그로 확인할 수 있다. Gateway route, normalizer rule/issue, Registry fallback(응답 모드별), Scope 첫 실패·재시도·fallback, fixed failure와 경로별 호출 수만 기록하며 원문 질문·정의·prompt·URL·예외 전문은 기록하지 않는다.
+- 프로세스별 안전 집계는 `runtime_metric_snapshot()`과 `runtime_metric` 로그로 확인할 수 있다. Gateway route, normalizer rule/issue, Registry fallback(응답 모드별), Scope 템플릿(category별), meta Scope Writer의 첫 실패·재시도·fallback, fixed failure와 경로별 호출 수만 기록하며 원문 질문·정의·prompt·URL·예외 전문은 기록하지 않는다.
 
 ## 수동 확인 항목
 

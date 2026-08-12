@@ -69,11 +69,13 @@ from llm_gateway import (
     validate_gateway_decision,
 )
 from scope_response import (
+    REDIRECT_VARIANT_COUNT,
     SCOPE_CATEGORIES,
     definition_claim_is_absent,
     prefers_english,
     sanitize_topic_summary,
     scope_fallback_draft,
+    scope_template_answer,
     validate_registry_scope_note,
     validate_scope_draft,
 )
@@ -181,6 +183,7 @@ class CompetencyState(MessagesState):
             "llm",
             "guidance_partial",
             "registry_fallback",
+            "scope_template",
             "scope_fallback",
             "failure",
         ]
@@ -1863,14 +1866,68 @@ def _validated_scope_answer(raw_draft: Any, state: CompetencyState) -> str | Non
     )
 
 
+def _redirect_variant(state: CompetencyState) -> int:
+    """Rotate the out-of-scope redirect deterministically, once per turn.
+
+    ``messages`` grows by exactly two entries per completed turn (one human,
+    one assistant), so the turn index is what must drive the rotation.  A bare
+    ``len(messages) % 4`` only ever produces two of the four variants.
+
+    Determinism matters beyond testability: a re-executed or resumed node must
+    reproduce the same string, or the public delta and the checkpointed
+    ``AIMessage`` stop matching in ``run_competency_stream``.
+    """
+
+    turn_index = max(len(state.get("messages", ())) - 1, 0) // 2
+    return turn_index % REDIRECT_VARIANT_COUNT
+
+
+def _scope_template_update(state: CompetencyState) -> dict[str, Any]:
+    """Answer an out-of-scope turn from a template, with no model call.
+
+    The only model-derived text that survives is the topic summary, and
+    ``sanitize_topic_summary`` has already reduced it to a short noun phrase or
+    a fixed category label.  Re-validating deterministic output on the request
+    path would just move a unit-test assertion into the user's turn, so the
+    template's safety is proven in ``test_scope_response`` instead.
+    """
+
+    _, category, summary, raw_query = _scope_values(state)
+    budget = _budget_from_state(state)
+    answer = scope_template_answer(
+        category=category,
+        summary=summary,
+        raw_query=raw_query,
+        variant=_redirect_variant(state),
+    )
+    _safe_custom_event({"type": "delta", "text": answer, "commit_required": True})
+    _record_runtime_metric("scope_template", category)
+    _record_runtime_metric("llm_calls", f"scope.{budget.used_calls}")
+    return {
+        "messages": AIMessage(content=answer),
+        "candidate_ids": [],
+        "candidate_names": [],
+        "last_candidate_ids": [],
+        "scope_writer_attempts": 0,
+        "scope_writer_failed": False,
+        "llm_call_count": budget.used_calls,
+        "response_mode": "scope_template",
+        "last_scope_answer": answer,
+        "next_route": END,
+    }
+
+
 async def write_scope_answer(state: CompetencyState) -> dict[str, Any]:
-    """Buffer strict Scope output and publish only after final validation."""
+    """Answer out-of-scope from a template; keep the model for meta turns."""
 
     _safe_custom_event({"type": "status", "stage": "답변을 작성하는 중"})
+    mode, category, summary, raw_query = _scope_values(state)
+    if mode == "out_of_scope":
+        return _scope_template_update(state)
+
     budget = _budget_from_state(state)
     attempts = int(state.get("scope_writer_attempts", 0) or 0)
     retry_issue = ""
-    mode, category, summary, raw_query = _scope_values(state)
 
     while attempts < 2 and budget.remaining_calls > 0:
         attempts += 1
@@ -1917,28 +1974,16 @@ async def write_scope_answer(state: CompetencyState) -> dict[str, Any]:
         summary=summary,
         raw_query=raw_query,
     )
+    # The meta draft is built from ``mode`` and the query language only, so a
+    # second attempt with a blanked summary would revalidate the same string.
     fallback = _validated_scope_answer(fallback_draft, state)
     if fallback is None:
-        fallback_draft = scope_fallback_draft(
-            mode=mode,
-            category=category,
-            summary="",
-            raw_query=raw_query,
-        )
-        fallback = validate_scope_draft(
-            fallback_draft,
-            mode=mode,
-            category=category,
-            summary="",
-            raw_query=raw_query,
-        )
-        if fallback is None:
-            return {
-                "scope_writer_attempts": attempts,
-                "scope_writer_failed": True,
-                "llm_call_count": budget.used_calls,
-                "next_route": "fixed_failure_message",
-            }
+        return {
+            "scope_writer_attempts": attempts,
+            "scope_writer_failed": True,
+            "llm_call_count": budget.used_calls,
+            "next_route": "fixed_failure_message",
+        }
     _safe_custom_event(
         {"type": "delta", "text": fallback, "commit_required": True}
     )

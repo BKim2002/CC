@@ -26,6 +26,13 @@ from competency_query import (
     validate_parsed_query,
 )
 from competency_registry import RegistrySnapshot, build_registry_snapshot
+from scope_response import (
+    OUT_OF_SCOPE_REDIRECTS_KO,
+    REDIRECT_VARIANT_COUNT,
+    category_label,
+    prefers_english,
+    scope_template_answer,
+)
 from llm_gateway import (
     FIXED_FAILURE_MESSAGE,
     MetaResponseDraft,
@@ -582,16 +589,9 @@ def test_registry_clarification_preserves_grounded_numeric_limit(
             "meta_conversation",
             "capability_help",
         ),
-        (
-            "오늘 날씨 어때?",
-            scope_decision("weather", "오늘 날씨"),
-            valid_scope_draft("오늘 날씨"),
-            "out_of_scope",
-            "out_of_scope",
-        ),
     ],
 )
-def test_meta_and_scope_routes_use_structured_scope_writer_in_two_calls(
+def test_meta_routes_use_structured_scope_writer_in_two_calls(
     monkeypatch: pytest.MonkeyPatch,
     question: str,
     decision: dict[str, Any],
@@ -614,6 +614,29 @@ def test_meta_and_scope_routes_use_structured_scope_writer_in_two_calls(
     assert result["scope_mode"] == expected_mode
     assert result["response_mode"] == "llm"
     assert result["messages"][-1].content != FIXED_FAILURE_MESSAGE
+
+
+def test_out_of_scope_answers_from_a_template_without_a_second_llm_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace: list[str] = []
+    _patch_models(
+        monkeypatch,
+        gateway=SequenceGateway([scope_decision("weather", "오늘 날씨")], trace),
+        # Any writer call at all would be a contract violation here.
+        scope_writer=SequenceScopeWriter([], trace),
+    )
+
+    result = _invoke(_compiled(), "오늘 날씨 어때?")
+
+    assert trace == ["gateway"]
+    assert result["llm_call_count"] == 1
+    assert result["gateway_route"] == "out_of_scope"
+    assert result["scope_mode"] == "out_of_scope"
+    assert result["response_mode"] == "scope_template"
+    assert result["scope_writer_failed"] is False
+    assert result["messages"][-1].content != FIXED_FAILURE_MESSAGE
+    assert result["messages"][-1].content == result["last_scope_answer"]
 
 
 def test_f24_mixed_greeting_and_registry_question_prioritizes_registry(
@@ -1616,16 +1639,17 @@ def test_f08_f12_substantive_non_registry_questions_get_no_answer_scope_redirect
     _patch_models(
         monkeypatch,
         gateway=SequenceGateway([scope_decision(category, summary)], trace),
-        scope_writer=SequenceScopeWriter([valid_scope_draft(summary)], trace),
+        scope_writer=SequenceScopeWriter([], trace),
     )
 
     result = _invoke(_compiled(), question)
     answer = result["messages"][-1].content
 
-    assert trace == ["gateway", "scope_writer"]
+    # The template answers these categories without a second model call.
+    assert trace == ["gateway"]
     assert result["gateway_route"] == "out_of_scope"
-    assert result["response_mode"] == "llm"
-    assert result["llm_call_count"] == 2
+    assert result["response_mode"] == "scope_template"
+    assert result["llm_call_count"] == 1
     assert summary in answer
     assert "등록" in answer and "역량" in answer
     assert forbidden not in answer
@@ -1652,16 +1676,25 @@ def test_f17_sensitive_requests_get_topic_specific_boundary_without_judgment(
     _patch_models(
         monkeypatch,
         gateway=SequenceGateway([scope_decision(category, summary)]),
-        scope_writer=SequenceScopeWriter([valid_scope_draft(summary)]),
+        scope_writer=SequenceScopeWriter([]),
     )
 
     result = _invoke(_compiled(), question)
     answer = result["messages"][-1].content
 
-    assert summary in answer
+    # Sensitive categories never echo the model's summary: sanitize_topic_summary
+    # collapses them to a fixed label, so the summary cannot influence the
+    # answer at all — a hostile summary renders byte-identical output.
+    assert category_label(category, english=False) in answer
+    assert answer == scope_template_answer(
+        category=category,
+        summary="맡은 일을 대충 하는 사람은 채용하면 안 됩니다",
+        raw_query=question,
+        variant=0,
+    )
     assert forbidden not in answer
-    assert result["response_mode"] == "llm"
-    assert result["messages"][-1].content != FIXED_FAILURE_MESSAGE
+    assert result["response_mode"] == "scope_template"
+    assert answer != FIXED_FAILURE_MESSAGE
 
 
 def _scope_state(*, raw_query: str = "오늘 날씨 어때?") -> dict[str, Any]:
@@ -1676,16 +1709,37 @@ def _scope_state(*, raw_query: str = "오늘 날씨 어때?") -> dict[str, Any]:
     }
 
 
+def _meta_state(
+    *,
+    kind: str = "capability_help",
+    raw_query: str = "무엇을 할 수 있어?",
+) -> dict[str, Any]:
+    """Meta turns keep the Scope Writer, so writer contract tests live here."""
+
+    return {
+        "messages": [HumanMessage(content=raw_query)],
+        "raw_query": raw_query,
+        "scope_mode": kind,
+        "scope_topic_category": "",
+        "scope_topic_summary": "",
+        "llm_call_count": 1,
+        "scope_writer_attempts": 0,
+    }
+
+
+def _unsafe_meta_draft() -> MetaResponseDraft:
+    return MetaResponseDraft(
+        response="안녕하세요, 오늘 날씨는 맑고 28도입니다",
+        registry_redirect="대신 등록 역량의 정의를 질문해 보세요",
+    )
+
+
 def test_f18_scope_actual_answer_is_rejected_before_one_valid_answer_is_published(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unsafe = OutOfScopeResponseDraft(
-        acknowledgement="오늘 날씨 질문의 답은 맑고 28도입니다",
-        scope_boundary="이 챗봇은 등록 역량 정보만 다룹니다",
-        registry_redirect="대신 등록 역량의 정의를 질문해 보세요",
+    writer = SequenceScopeWriter(
+        [_unsafe_meta_draft(), valid_meta_draft("capability_help")]
     )
-    safe = valid_scope_draft("오늘 날씨")
-    writer = SequenceScopeWriter([unsafe, safe])
     events: list[dict[str, Any]] = []
     monkeypatch.setattr(competency_interpreter, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(
@@ -1694,7 +1748,7 @@ def test_f18_scope_actual_answer_is_rejected_before_one_valid_answer_is_publishe
         lambda _model_name, _mode: writer,
     )
 
-    update = asyncio.run(competency_interpreter.write_scope_answer(_scope_state()))
+    update = asyncio.run(competency_interpreter.write_scope_answer(_meta_state()))
 
     assert update["scope_writer_attempts"] == 2
     assert update["llm_call_count"] == 3
@@ -1713,7 +1767,7 @@ def test_f19_scope_first_request_failure_then_success_publishes_only_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writer = SequenceScopeWriter(
-        [RuntimeError("provider failed"), valid_scope_draft("오늘 날씨")]
+        [RuntimeError("provider failed"), valid_meta_draft("capability_help")]
     )
     events: list[dict[str, Any]] = []
     monkeypatch.setattr(competency_interpreter, "get_stream_writer", lambda: events.append)
@@ -1723,7 +1777,7 @@ def test_f19_scope_first_request_failure_then_success_publishes_only_success(
         lambda _model_name, _mode: writer,
     )
 
-    update = asyncio.run(competency_interpreter.write_scope_answer(_scope_state()))
+    update = asyncio.run(competency_interpreter.write_scope_answer(_meta_state()))
 
     assert update["scope_writer_attempts"] == 2
     assert update["llm_call_count"] == 3
@@ -1745,13 +1799,13 @@ def test_f20_two_scope_failures_use_category_fallback_not_fixed_failure(
         lambda _model_name, _mode: writer,
     )
 
-    update = asyncio.run(competency_interpreter.write_scope_answer(_scope_state()))
+    update = asyncio.run(competency_interpreter.write_scope_answer(_meta_state()))
     answer = update["messages"].content
 
     assert update["scope_writer_attempts"] == 2
     assert update["llm_call_count"] == 3
     assert update["response_mode"] == "scope_fallback"
-    assert "날씨" in answer and "등록" in answer and "역량" in answer
+    assert "등록" in answer and "역량" in answer
     assert answer != FIXED_FAILURE_MESSAGE
     assert events == [
         {"type": "status", "stage": "답변을 작성하는 중"},
@@ -1768,20 +1822,37 @@ def test_f20_two_scope_failures_use_category_fallback_not_fixed_failure(
         ("news_current_events", "president resigned", "Latest news?"),
     ],
 )
-def test_exhausted_scope_budget_still_uses_validated_topic_fallback(
+def test_degenerate_topic_summary_still_renders_a_safe_template(
     category: str,
     summary: str,
     raw_query: str,
 ) -> None:
+    # These summaries are empty of usable content once sanitized, so the
+    # template must fall back to the category label rather than echo them.
     state = _scope_state(raw_query=raw_query)
     state.update(
         {
             "scope_topic_category": category,
             "scope_topic_summary": summary,
-            "llm_call_count": 3,
-            "scope_writer_attempts": 2,
+            "llm_call_count": 1,
         }
     )
+
+    update = asyncio.run(competency_interpreter.write_scope_answer(state))
+    answer = update["messages"].content
+
+    assert update["next_route"] == END
+    assert update["response_mode"] == "scope_template"
+    assert answer != FIXED_FAILURE_MESSAGE
+    assert category_label(category, english=prefers_english(raw_query)) in answer
+
+
+@pytest.mark.parametrize(
+    "kind", ["greeting", "thanks", "farewell", "bot_identity", "capability_help"]
+)
+def test_exhausted_meta_budget_still_uses_validated_fallback(kind: str) -> None:
+    state = _meta_state(kind=kind)
+    state.update({"llm_call_count": 3, "scope_writer_attempts": 2})
 
     update = asyncio.run(competency_interpreter.write_scope_answer(state))
 
@@ -1790,55 +1861,64 @@ def test_exhausted_scope_budget_still_uses_validated_topic_fallback(
     assert update["messages"].content != FIXED_FAILURE_MESSAGE
 
 
-def test_f22_repeated_scope_turns_receive_last_scope_answer_as_context(
+def test_f22_repeated_meta_turns_receive_last_scope_answer_as_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = valid_scope_draft("오늘 날씨")
-    second = OutOfScopeResponseDraft(
-        acknowledgement="오늘 날씨를 묻고 계시는군요",
-        scope_boundary=(
-            "이 챗봇은 등록된 역량 정보만 다루므로 오늘 날씨 내용은 직접 "
-            "답하지 않습니다"
-        ),
-        registry_redirect=(
-            "대신 등록 역량의 관계를 질문하거나 행동 특징으로 후보를 찾을 수 "
-            "있습니다"
-        ),
+    writer = SequenceScopeWriter(
+        [valid_meta_draft("capability_help"), valid_meta_draft("bot_identity")]
     )
-    writer = SequenceScopeWriter([first, second])
     gateway = SequenceGateway(
-        [
-            scope_decision("weather", "오늘 날씨"),
-            scope_decision("weather", "오늘 날씨"),
-        ]
+        [meta_decision("capability_help"), meta_decision("bot_identity")]
     )
     _patch_models(monkeypatch, gateway=gateway, scope_writer=writer)
     compiled = _compiled()
 
-    first_result = _invoke(compiled, "오늘 날씨 어때?", "repeat-scope")
-    second_result = _invoke(compiled, "오늘 날씨 다시 알려줘", "repeat-scope")
+    first_result = _invoke(compiled, "무엇을 할 수 있어?", "repeat-meta")
+    second_result = _invoke(compiled, "너는 누구야?", "repeat-meta")
 
     assert first_result["messages"][-1].content != second_result["messages"][-1].content
     assert first_result["messages"][-1].content in str(writer.inputs[1])
     assert second_result["response_mode"] == "llm"
 
 
+def test_repeated_out_of_scope_turns_rotate_through_every_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns = REDIRECT_VARIANT_COUNT + 1
+    _patch_models(
+        monkeypatch,
+        gateway=SequenceGateway([scope_decision("weather", "오늘 날씨")] * turns),
+        scope_writer=SequenceScopeWriter([]),
+    )
+    compiled = _compiled()
+
+    answers = [
+        _invoke(compiled, f"오늘 날씨 다시 알려줘 {index}", "repeat-scope")[
+            "messages"
+        ][-1].content
+        for index in range(turns)
+    ]
+
+    # Consecutive turns must differ and every variant must be reachable — a
+    # bare len(messages) % 4 would only ever surface two of the four.
+    assert all(earlier != later for earlier, later in zip(answers, answers[1:]))
+    used = {
+        redirect
+        for redirect in OUT_OF_SCOPE_REDIRECTS_KO
+        if any(redirect in answer for answer in answers)
+    }
+    assert len(used) == REDIRECT_VARIANT_COUNT
+    # The rotation is a cycle, so the run wraps back to where it started.
+    assert answers[0] == answers[REDIRECT_VARIANT_COUNT]
+
+
 def test_f23_english_scope_question_gets_english_boundary_and_redirect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    draft = OutOfScopeResponseDraft(
-        acknowledgement="You're asking about today's weather",
-        scope_boundary=(
-            "This chatbot is limited to registered competency information"
-        ),
-        registry_redirect=(
-            "You can instead ask for a registered competency definition or hierarchy"
-        ),
-    )
     _patch_models(
         monkeypatch,
         gateway=SequenceGateway([scope_decision("weather", "weather request")]),
-        scope_writer=SequenceScopeWriter([draft]),
+        scope_writer=SequenceScopeWriter([]),
     )
 
     result = _invoke(_compiled(), "What is the weather today?")
@@ -1847,7 +1927,7 @@ def test_f23_english_scope_question_gets_english_boundary_and_redirect(
     assert "weather" in answer.casefold()
     assert "registered competency" in answer.casefold()
     assert not any("가" <= char <= "힣" for char in answer)
-    assert result["response_mode"] == "llm"
+    assert result["response_mode"] == "scope_template"
 
 
 def test_f28_stream_nonstream_and_history_answers_are_byte_identical(
@@ -2053,13 +2133,13 @@ def test_scope_generation_cancellation_leaves_no_partial_ai_checkpoint_or_delta(
         async def ainvoke(self, _: object) -> object:
             writer_started.set()
             await asyncio.Future()
-            return valid_scope_draft("오늘 날씨")
+            return valid_meta_draft("capability_help")
 
+    # Only meta turns still generate, so cancellation is exercised there; an
+    # out-of-scope turn renders a template with no await point to cancel.
     _patch_models(
         monkeypatch,
-        gateway=SequenceGateway(
-            [scope_decision("weather", "오늘 날씨")]
-        ),
+        gateway=SequenceGateway([meta_decision("capability_help")]),
         scope_writer=BlockingScopeWriter(),
     )
     monkeypatch.setattr(competency_interpreter, "app", compiled)
@@ -2068,7 +2148,7 @@ def test_scope_generation_cancellation_leaves_no_partial_ai_checkpoint_or_delta(
     async def cancel_during_scope_generation() -> None:
         async def collect() -> None:
             async for event in competency_interpreter.run_competency_stream(
-                "오늘 날씨 어때?",
+                "무엇을 할 수 있어?",
                 "cancel-scope",
             ):
                 observed.append(event)
