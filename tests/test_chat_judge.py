@@ -194,20 +194,38 @@ def test_judge_schema_has_no_verdict_field() -> None:
 
 
 def test_unregistered_name_asserted_as_registered_is_caught(snapshot) -> None:
-    judged = {"numbers": [], "asserted_names": ["잎A", "없는역량"]}
+    judged = {"numbers": [], "asserted_names": ["없는역량"]}
 
-    verdict = verify(snapshot, [], judged)
+    verdict = verify(snapshot, [], judged, "없는역량은 부모의 하위요인입니다.")
 
     assert not verdict.ok
     assert verdict.findings[0].kind == "unregistered_name"
     assert "없는역량" in verdict.findings[0].detail
 
 
-def test_registered_names_pass(snapshot) -> None:
-    verdict = verify(snapshot, [], {"numbers": [], "asserted_names": ["부모", "잎A"]})
+def test_a_name_the_judge_wrongly_flagged_is_dropped_by_code(snapshot) -> None:
+    """판정은 코드가 한다. judge가 등록된 이름을 지목해도 통과시킨다."""
+
+    judged = {"numbers": [], "asserted_names": ["잎A"]}
+
+    assert verify(snapshot, [], judged, "잎A는 등록된 역량입니다.").ok
+
+
+def test_registered_names_are_counted_by_code_not_the_judge(snapshot) -> None:
+    """목록 답변의 이름 40개를 judge가 열거하게 하던 것이 판정 실패의 주된
+
+    원인이었다 (REBUILD_PLAN 8단계 D).  등록 여부는 문자열 대조로 확정된다.
+    """
+
+    verdict = verify(
+        snapshot,
+        [],
+        {"numbers": [], "asserted_names": []},
+        "부모의 하위요인은 잎A와 잎B입니다.",
+    )
 
     assert verdict.ok
-    assert verdict.checked_names == 2
+    assert verdict.checked_names == 3
 
 
 # ── 재생성 힌트 ──────────────────────────────────────────────────────

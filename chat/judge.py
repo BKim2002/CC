@@ -213,10 +213,24 @@ JUDGE_SYSTEM_PROMPT = f"""\
   검사 이름만으로 세는 것도, 조건 없이 전체를 세는 것도 count로 표현된다.
   이런 것을 unsupported로 보내지 않는다.
 
-**2. 답변이 등록된 역량이라고 단정한 이름을 모두 적는다.**
+**2. 답변이 등록된 역량으로 취급한 이름을 적는다.**
 
-  답변이 "등록되어 있지 않다"고 말한 이름은 넣지 않는다. 등록된 역량으로
-  다루거나 정의·위계를 제시한 이름만 넣는다.
+  답변이 **주제로 삼아** 다음 중 하나를 한 이름만 적는다.
+
+  - 그 이름의 정의를 제시했다
+  - 그 이름이 어떤 위계 단계(상위요인·하위요인 등)라고 말했다
+  - 그 이름이 다른 역량의 상위나 하위라고 말했다
+
+  적지 않는 것:
+
+  - 목록이나 표의 항목으로 **나열만** 된 이름. 30개를 나열했다면 30개 모두
+    적지 않는다.
+  - 답변이 "등록되어 있지 않다", "등록된 이름이 아니다"라고 **밝힌** 이름.
+    사용자가 물어서 답변이 미등록임을 알려준 경우이며, 올바른 처리다.
+  - 비슷한 이름으로 **제안만** 한 이름.
+
+  등록 여부는 판단하지 않는다. 다른 곳에서 확인한다. 대부분의 답변에서 이
+  목록은 비어 있거나 한둘이다.
 
 추측하지 않는다. 답변이 실제로 말한 것만 옮긴다.
 """
@@ -277,6 +291,24 @@ JUDGE_SCHEMA: dict[str, Any] = {
     "required": ["numbers", "asserted_names"],
     "additionalProperties": False,
 }
+
+
+def mentioned_registered_names(
+    text: str,
+    snapshot: RegistrySnapshot,
+) -> list[str]:
+    """답변에 등장한 **등록된** 이름을 코드가 찾는다.
+
+    judge에게 시키던 일이다.  목록 답변 하나에 이름이 40개씩 들어가고 그것을
+    전부 정확히 열거하라는 요구가 판정 실패의 주된 원인이었다 -- 판정 모델만
+    바꿔도 통과율이 9/9에서 5/9로 떨어졌다(REBUILD_PLAN 8단계 D).
+
+    등록 여부는 문자열 대조로 확정된다.  추론이 필요 없으므로 코드가 한다.
+    judge에게는 "목록에 없는 이름을 등록된 것처럼 다뤘는가"라는 작은 판단만
+    남고, 그런 이름은 보통 없거나 하나다.
+    """
+
+    return [label for label in snapshot.lookup if label in text]
 
 
 _RELATION_TERMS: Mapping[str, str] = {
@@ -352,6 +384,7 @@ def verify(
     snapshot: RegistrySnapshot,
     spans: Sequence[NumberSpan],
     judged: Mapping[str, Any],
+    answer_text: str = "",
 ) -> GroundingVerdict:
     """judge가 옮긴 주장을 코드가 대조한다. 여기서만 참·거짓이 정해진다."""
 
@@ -366,8 +399,8 @@ def verify(
             Finding(
                 kind="incomplete_judgement",
                 detail=(
-                    f"숫자 {len(spans)}개 중 {len(numbers)}개만 판정되었다. "
-                    "전부 판정되어야 한다."
+                    f"답변의 숫자는 {len(spans)}개인데 판정은 {len(numbers)}개다. "
+                    "하나도 빠지거나 더해지지 않아야 한다."
                 ),
             )
         )
@@ -427,20 +460,24 @@ def verify(
         else:
             verdict.facts[label] = truth
 
+    # 등록된 이름은 코드가 찾는다. judge를 거치지 않으므로 빠뜨릴 수 없다.
+    verdict.checked_names = len(mentioned_registered_names(answer_text, snapshot))
+
     for name in judged.get("asserted_names", ()):
         cleaned = str(name).strip()
         if not cleaned:
             continue
-        verdict.checked_names += 1
-        if cleaned not in snapshot.lookup:
-            verdict.ok = False
-            verdict.findings.append(
-                Finding(
-                    kind="unregistered_name",
-                    detail=f"'{cleaned}'은(는) 레지스트리에 없는데 등록된 역량처럼 다뤘다.",
-                    actual=cleaned,
-                )
+        # judge가 잘못 지목했을 수 있다. 판정은 코드가 한다.
+        if cleaned in snapshot.lookup:
+            continue
+        verdict.ok = False
+        verdict.findings.append(
+            Finding(
+                kind="unregistered_name",
+                detail=f"'{cleaned}'은(는) 레지스트리에 없는데 등록된 역량처럼 다뤘다.",
+                actual=cleaned,
             )
+        )
 
     return verdict
 
@@ -495,4 +532,9 @@ def check_grounding(
             HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
         ]
     )
-    return verify(snapshot, spans, judged or {"numbers": [], "asserted_names": []})
+    return verify(
+        snapshot,
+        spans,
+        judged or {"numbers": [], "asserted_names": []},
+        answer_text,
+    )
