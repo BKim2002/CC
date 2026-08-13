@@ -15,3 +15,6 @@ data/competency_checkpoints.sqlite-wal
 # Competency source and generated registry are stored in PostgreSQL
 competency-definitions 1.md
 data/competencies.json
+
+# Spike/eval output quotes registry definitions — never tracked
+evals/results/

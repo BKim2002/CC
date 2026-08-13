@@ -1,10 +1,19 @@
+"""chat.registry 이식 검증.
+
+tests/test_competency_registry.py 에서 옮겨 왔다.  달라진 곳은 두 군데다 --
+import 경로, 그리고 v2가 만들지 않는 name_catalog/semantic_catalog 단언 제거.
+나머지 검증(문서 검증, 방어적 복사, 재귀 freeze, 로더)은 그대로다.
+
+v1 테스트는 지우지 않는다.  REBUILD_PLAN 5절에 따라 v1 삭제는 맨 마지막이다.
+"""
+
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 
 import pytest
 
-import competency_registry
-from competency_registry import (
+from chat import registry as chat_registry
+from chat.registry import (
     RegistryValidationError,
     build_registry_snapshot,
     load_active_registry,
@@ -70,15 +79,13 @@ def _row() -> dict:
     }
 
 
-def test_build_snapshot_creates_indexes_and_catalogs() -> None:
+def test_build_snapshot_creates_indexes() -> None:
     snapshot = build_registry_snapshot(_row())
 
     assert snapshot.version_id == 7
     assert snapshot.canonical_names == ("역량 베타", "역량 알파")
     assert snapshot.canonical_lookup["역량 알파"]["id"] == "synthetic:alpha"
     assert snapshot.lookup["알파"] is snapshot.lookup["역량 알파"]
-    assert "등록 별칭: 알파" in snapshot.name_catalog
-    assert "역량 알파의 정의" in snapshot.semantic_catalog
     with pytest.raises(FrozenInstanceError):
         snapshot.version_id = 8  # type: ignore[misc]
 
@@ -153,7 +160,7 @@ def test_load_active_registry_uses_bound_singleton_parameter(
         captured["row_factory"] = row_factory
         return _FakeConnection(cursor)
 
-    monkeypatch.setattr(competency_registry, "connect", fake_connect)
+    monkeypatch.setattr(chat_registry, "connect", fake_connect)
 
     snapshot = load_active_registry("postgresql://private-value")
 
@@ -168,7 +175,7 @@ def test_load_active_registry_rejects_missing_active_row(
 ) -> None:
     cursor = _FakeCursor(None)
     monkeypatch.setattr(
-        competency_registry,
+        chat_registry,
         "connect",
         lambda *args, **kwargs: _FakeConnection(cursor),
     )
@@ -376,7 +383,7 @@ def test_snapshot_derives_id_lookup_and_reports_a_missing_stable_id() -> None:
     assert snapshot.id_lookup[first["id"]]["name"] == first["name"]
 
     with pytest.raises(RegistryValidationError, match="stable ID"):
-        competency_registry.RegistrySnapshot(
+        chat_registry.RegistrySnapshot(
             version_id=snapshot.version_id,
             source_filename=snapshot.source_filename,
             source_sha256=snapshot.source_sha256,
@@ -385,6 +392,4 @@ def test_snapshot_derives_id_lookup_and_reports_a_missing_stable_id() -> None:
             lookup={},
             canonical_lookup={},
             canonical_names=(),
-            name_catalog="",
-            semantic_catalog="",
         )

@@ -5,8 +5,8 @@ from copy import deepcopy
 import pytest
 
 import scripts.registry_compiler as compiler
-from competency_registry import RegistryValidationError
-from competency_registry import validate_registry_document
+from chat.registry import RegistryValidationError
+from chat.registry import validate_registry_document
 from scripts.registry_compiler import (
     RegistryCompileError,
     compile_registry,

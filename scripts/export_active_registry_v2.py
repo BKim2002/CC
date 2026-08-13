@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:  # 직접 스크립트 실행 경로
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from competency_registry import load_active_registry  # noqa: E402
+from chat.registry import load_active_registry  # noqa: E402
 from scripts.registry_compiler import compile_registry  # noqa: E402
 from scripts.registry_source_v2 import (  # noqa: E402
     SourceInstrument,

@@ -1,0 +1,536 @@
+# 역량 챗봇 평가 케이스
+#
+# 계획: docs/REBUILD_PLAN.md 5절 0단계
+#
+# 이 파일은 새로 작성한 것이 아니라 기존 문서에 흩어져 있던 수용 기준과
+# 실패 기록을 한곳에 모은 것이다. 출처는 각 케이스의 `src`에 적혀 있다.
+#
+#   F01~F30  docs/prd/ONE_TIME_REGISTRY_FIRST_INPUT_FLEXIBILITY_PRD.md:844
+#   A01~A22  docs/prd/ONE_TIME_LLM_GATEWAY_DUAL_WRITER_PRD.md:617
+#   FRAGILE  docs/superpowers/plans/2026-08-12-registry-mention-classification-plan.md:127
+#            (표현만 바꿔서 깨지던, 실제로 측정된 10건)
+#   MENTION  docs/superpowers/specs/2026-08-12-registry-mention-classification-design.md:73
+#   ADR-001  docs/adr/ADR-001-registry-writer-grounding-contract.md:54
+#   NEW      이번에 추가. 기존 문서가 다루지 않은 구멍
+#
+#
+# ── active registry 대조 결과 (2026-08-12, version_id=2) ────────
+#
+#   source: competency-definitions-v2-from-v1-20260806.md
+#   62개 항목 / 정식 이름 62개 / 별칭 포함 lookup 65개
+#
+#   등록 확인:   성실성(L2) 책임성(L3) 전략성(L2) 협력성(L3)
+#   미등록 확인: 정의감 혁신성 그릿 협업
+#   검사:        필기 역량검사 53개 / 영상면접 9개
+#   티어:        상위=L1(3) 중위=L2(10) 하위=L3(30) 최하위=L4(9) 종합=1
+#   루트 4개:    역검 종합점수, 표현능력, 답변태도, 대인매력 (단일 트리가 아님)
+#
+# `협업`은 등록되어 있다고 가정했으나 실제로는 없다.  difflib 근접 후보도
+# 없어서(cutoff 0.5) `u07`로 옮겼다.  등록된 이름은 `협력성`이다.
+#
+# 채점 주의: 하위요인(L3) 30개와 analysis_included 30개가 우연히 같은 수다.
+# 둘을 혼동한 답을 정답으로 세지 않는다.
+#
+#
+# ── expect 값 ───────────────────────────────────────────────────
+#
+#   answer        레지스트리 근거로 답한다
+#   count         숫자를 포함해 답한다 (도구 필요)
+#   unregistered  미등록임을 알리고 후보를 주거나 구체화를 요청한다
+#   mixed         등록된 부분은 답하고 미등록 부분은 따로 안내한다
+#   clarify       되묻는다 — 해석이 실제로 둘 이상일 때만
+#   refuse        답하지 않고 거절 + 할 수 있는 일 안내
+#   meta          인사·소개·기능 안내
+#
+# `must_not`은 있으면 즉시 실패다. 채점자가 가장 먼저 보는 칸.
+# `context`는 이 질문 앞에 순서대로 넣을 사용자 발화다.
+# `expected`는 레지스트리에서 확정된 정답값이다. 있으면 채점이 기계적이다.
+#
+#
+# ── 채점 ────────────────────────────────────────────────────────
+#
+# 초기에는 수동이다. 중요한 것은 집합이 고정되는 것이고,
+# 3~5단계의 축소를 하나 얹을 때마다 이 파일 전체를 다시 돌린다.
+# 이전에 통과하던 것이 깨지면 그 축소가 과했다는 뜻이다.
+#
+# 케이스 53건 / 그룹 7개.
+
+meta:
+  version: 1
+  updated: 2026-08-12
+  groups:
+    registry: 명백한 역량 질문
+    aggregate: 집계
+    unregistered: 미등록 이름
+    out_of_scope: 명백한 무관 질문
+    boundary: 경계 사례
+    context: 맥락 의존 후속질문
+    meta: 인사·기능 안내
+
+cases:
+
+# ─────────────────────────────────────────────────────────────────
+# registry — 명백한 역량 질문 (14)
+#
+# FRAGILE 10건 중 8건이 여기 있다. 전부 "같은 것을 다르게 물었을 뿐"인데
+# v1에서 깨졌다. 이 그룹이 통과하지 못하면 재설계의 전제가 무너진 것이다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: r01
+  group: registry
+  q: 성실성이 뭐야?
+  expect: answer
+  note: 레지스트리 원문 정의를 그대로 준다
+  src: F04
+
+- id: r02
+  group: registry
+  q: 성실성의 정의를 알려줘
+  expect: answer
+  note: r01과 같은 답
+  src: F04
+
+- id: r03
+  group: registry
+  q: 책임성 목록 보여줘
+  expect: answer
+  note: 등록명 + 목록. v1에서도 정상이던 기준선. 책임성은 L3 리프라 하위가 없다
+  must_not: 없는 하위 항목을 지어낸다
+  src: MENTION
+
+- id: r04
+  group: registry
+  q: 역량 목록 좀 알려줘
+  expect: answer
+  src: FRAGILE
+
+- id: r05
+  group: registry
+  q: 역량 종류 좀 알려줘
+  expect: answer
+  note: '"종류"가 "목록"과 같아야 한다'
+  src: FRAGILE
+
+- id: r06
+  group: registry
+  q: 전체 역량 목록 좀 알려줘
+  expect: answer
+  src: FRAGILE
+
+- id: r07
+  group: registry
+  q: 등록된 역량 다 보여줘
+  expect: answer
+  src: FRAGILE
+
+- id: r08
+  group: registry
+  q: 어떤 역량들이 있어?
+  expect: answer
+  src: FRAGILE
+
+- id: r09
+  group: registry
+  q: 역량 리스트 뽑아줘
+  expect: answer
+  src: FRAGILE
+
+- id: r10
+  group: registry
+  q: 위계 구조 알려줘
+  expect: answer
+  src: FRAGILE
+
+- id: r11
+  group: registry
+  q: 역량 트리 보여줘
+  expect: answer
+  note: r10과 같은 답
+  src: FRAGILE
+
+- id: r12
+  group: registry
+  q: 분석에 포함되는 역량만
+  expect: answer
+  note: >
+    analysis_included 필터. 문장이 아니어도 받아야 한다.
+    4단계에서 expected 30을 뺐다 — 이 케이스는 목록을 요구하는 answer이지
+    개수를 요구하는 count이 아니다. 30개를 정확히 나열하고 숫자를 쓰지 않은
+    답이 자동 판정에서 X로 잡혔다. 우연히 L3도 30개라 혼동 주의
+  src: FRAGILE
+
+- id: r13
+  group: registry
+  q: 성실성이랑 책임성 차이가 뭐야?
+  expect: answer
+  must_not: 레지스트리에 없는 비교 근거를 지어낸다
+  src: A02
+
+- id: r14
+  group: registry
+  q: 성실성의 상위요인은?
+  expect: answer
+  expected: 성과 예측
+  note: 성실성은 L2이므로 부모는 L1
+  src: A02
+
+# ─────────────────────────────────────────────────────────────────
+# aggregate — 집계 (6)
+#
+# 도구가 필요한 유일한 계열. 컨텍스트만으로 세면 틀린다.
+# g01~g03은 v1의 대표 실패 사례이고 셋이 같은 답을 내야 한다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: g01
+  group: aggregate
+  q: 하위요인은 총 몇 개야?
+  expect: count
+  expected: 30
+  note: 필기 역량검사의 하위요인 = L3. analysis_included도 30개라 혼동 주의
+  must_not: 되묻는다
+  src: F01
+
+- id: g02
+  group: aggregate
+  q: 전체 하위요인의 개수가 궁금해
+  expect: count
+  expected: 30
+  note: g01과 같은 수
+  src: F02
+
+- id: g03
+  group: aggregate
+  q: 하위 요인 수 알려줘
+  expect: count
+  expected: 30
+  note: g01과 같은 수. 띄어쓰기만 다르다
+  src: F03
+
+- id: g04
+  group: aggregate
+  q: 검사별 역량 수 알려줘
+  expect: count
+  expected: {필기 역량검사: 53, 영상면접: 9}
+  src: FRAGILE
+
+- id: g05
+  group: aggregate
+  q: 등록된 역량이 전부 몇 개야?
+  expect: count
+  expected: 62
+  src: NEW
+
+- id: g06
+  group: aggregate
+  q: 전략성 아래에 몇 개 있어?
+  expect: count
+  expected: {직속: 3, 후손: 12}
+  note: >
+    전략성은 직속 3개와 전체 후손 12개가 다르다. 어느 쪽을 센 것인지
+    답에서 드러나야 한다. 성실성은 둘 다 3이라 이 구분을 시험하지 못한다
+  must_not: 어느 쪽을 센 것인지 밝히지 않고 숫자만 준다
+  src: NEW
+
+# ─────────────────────────────────────────────────────────────────
+# unregistered — 미등록 이름 (6)
+#
+# 가장 위험한 계열. LLM이 일반 지식으로 정의해버리면 조용히 틀린다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: u01
+  group: unregistered
+  q: 정의감은 뭐야?
+  expect: unregistered
+  must_not: 일반 개념으로 정의한다
+  note: 검증된 후보 최대 3개, 없으면 구체화 요청
+  src: F05
+
+- id: u02
+  group: unregistered
+  q: 혁신성이 뭐야?
+  expect: unregistered
+  must_not: 일반 개념으로 정의한다
+  src: MENTION
+
+- id: u03
+  group: unregistered
+  q: 그릿의 정의 알려줘
+  expect: unregistered
+  must_not: 일반 개념으로 정의한다
+  src: MENTION
+
+- id: u04
+  group: unregistered
+  q: 전략성, 정의감의 정의
+  expect: mixed
+  note: 전략성은 답하고 정의감은 미등록으로 안내한다. 한쪽을 삼키면 실패
+  src: MENTION
+
+- id: u05
+  group: unregistered
+  q: 책임쎵 알려줘
+  expect: clarify
+  note: 오타. 후보로 책임성을 제시한다
+  src: MENTION
+
+- id: u06
+  group: unregistered
+  q: 혁신성 목록 보여줘
+  expect: unregistered
+  note: v1의 알려진 미해결 — 조용히 전체 목록이 나왔다. 회귀 감시용
+  must_not: 미등록 이름을 무시하고 전체 목록을 준다
+  src: MENTION
+
+- id: u07
+  group: unregistered
+  q: 협업 역량이 뭐야?
+  expect: unregistered
+  must_not: 협력성을 협업이라고 부르거나 일반 개념으로 정의한다
+  note: >
+    미등록이고 difflib 근접 후보도 없다(cutoff 0.5). 후보 없이 구체화를
+    요청하는 경로를 시험한다. 등록된 이름은 협력성이며 A08과 ADR-001이
+    협업을 등록명처럼 예시로 쓴 탓에 이 오해가 문서에 남아 있었다
+  src: NEW
+
+# ─────────────────────────────────────────────────────────────────
+# out_of_scope — 명백한 무관 질문 (8)
+#
+# 요구사항 2번. 거절하되 시스템 장애처럼 보이면 안 된다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: o01
+  group: out_of_scope
+  q: 오늘이 며칠이야?
+  expect: refuse
+  must_not: 날짜를 말한다
+  note: 장애 문구가 아니라 정상적인 범위 안내
+  src: F08
+
+- id: o02
+  group: out_of_scope
+  q: 지금 몇 시야?
+  expect: refuse
+  must_not: 시각을 말한다
+  src: F09
+
+- id: o03
+  group: out_of_scope
+  q: 오늘 날씨 어때?
+  expect: refuse
+  must_not: 날씨를 말한다
+  src: F10
+
+- id: o04
+  group: out_of_scope
+  q: 요즘 뉴스 뭐 있어?
+  expect: refuse
+  must_not: 최신 사실을 말한다
+  src: F11
+
+- id: o05
+  group: out_of_scope
+  q: 파이썬으로 정렬하는 코드 짜줘
+  expect: refuse
+  must_not: 코드를 준다
+  src: F12
+
+- id: o06
+  group: out_of_scope
+  q: 머신러닝이 뭐야?
+  expect: refuse
+  must_not: 개념을 설명한다
+  note: 일반 개념 설명은 지원 범위에서 제거됨 (Input Flexibility PRD 3.2)
+  src: F12
+
+- id: o07
+  group: out_of_scope
+  q: What's the weather like today?
+  expect: refuse
+  note: 영어로 거절한다
+  must_not: 날씨를 말한다
+  src: F23
+
+- id: o08
+  group: out_of_scope
+  q: 이 챗봇 말고 쓸 만한 다른 서비스 추천해줘
+  expect: refuse
+  src: NEW
+
+# ─────────────────────────────────────────────────────────────────
+# boundary — 경계 사례 (7)
+#
+# 정답이 갈리는 곳. 여기서 오판이 나면 스코프 판정 프롬프트를 고친다.
+# b07은 ADR-001이 "남는 구멍"으로 기록한 해석성 산문을 겨냥한다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: b01
+  group: boundary
+  q: 협력성 역량을 높이려면?
+  expect: answer
+  note: >
+    등록 정의를 근거로 주되 일반 제안과 명확히 구분한다.
+    A08의 원문은 `협업`이었으나 미등록이라 등록명으로 교체했다
+  must_not: 등록 정보인 것처럼 일반 조언을 섞는다
+  src: A08
+
+- id: b02
+  group: boundary
+  q: 성실성 높은 사람을 뽑으려면 면접에서 뭘 물어봐야 해?
+  expect: refuse
+  note: 채용 판단은 범위 밖. 다만 성실성의 등록 정보 안내로 연결할 수 있다
+  must_not: 면접 질문을 만들어준다
+  src: F17
+
+- id: b03
+  group: boundary
+  q: 내 역량 점수 좀 추정해줘
+  expect: refuse
+  must_not: 개인을 평가한다
+  src: A09
+
+- id: b04
+  group: boundary
+  q: 주도적으로 일하는 역량은?
+  expect: answer
+  note: 행동 설명 → 의미 검색. 고확신 단일 후보면 조회, 아니면 최대 3개
+  must_not: 등록되지 않은 이름을 후보로 준다
+  src: A10
+
+- id: b05
+  group: boundary
+  q: 우리 팀에 성실성이 부족한데 어떡하지?
+  expect: answer
+  note: 성실성의 등록 정보는 주되 조직 진단은 하지 않는다
+  must_not: 팀 상태를 진단하거나 조직 개선안을 처방한다
+  src: NEW
+
+- id: b06
+  group: boundary
+  q: 역량검사 결과를 어떻게 해석해?
+  expect: refuse
+  note: 검사 해석은 레지스트리에 없다. 등록된 검사 메타 정보 안내로는 연결 가능
+  must_not: 점수 해석 기준을 지어낸다
+  src: NEW
+
+- id: b07
+  group: boundary
+  q: 성실성이 리더십에 왜 중요해?
+  expect: answer
+  note: 등록 정의는 인용하되 인과 주장은 하지 않는다
+  must_not: 레지스트리에 없는 인과 관계를 사실처럼 말한다
+  src: ADR-001
+
+# ─────────────────────────────────────────────────────────────────
+# context — 맥락 의존 후속질문 (6)
+#
+# c04가 핵심이다. 스코프 judge가 항소심이라 맥락이 길면 거절을
+# 뒤집는 쪽으로 기운다. 앞에서 역량을 얘기했다는 이유로
+# 날씨 질문이 통과하면 REBUILD_PLAN 3.7의 우려가 현실이 된 것이다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: c01
+  group: context
+  context:
+    - "성실성이 뭐야?"
+  q: 그거 하위요인은?
+  expect: answer
+  note: 직전 대상을 이어받는다
+  src: A11
+
+- id: c02
+  group: context
+  context:
+    - "성실성이 뭐야?"
+  q: 그럼 상위는?
+  expect: answer
+  src: A11
+
+- id: c03
+  group: context
+  context:
+    - "역량 목록 보여줘"
+  q: 세 번째 거 자세히 알려줘
+  expect: clarify
+  note: >
+    1단계에서 기대값을 answer에서 clarify로 정정했다. "세 번째"는 전체 목록
+    기준·상위요인 기준·특정 부모의 자식 기준으로 갈려 실제로 모호하다.
+    되묻는 것이 맞다
+  src: NEW
+
+- id: c04
+  group: context
+  context:
+    - "성실성이 뭐야?"
+    - "하위요인은 몇 개야?"
+  q: 그럼 오늘 날씨는?
+  expect: refuse
+  must_not: 앞에서 역량을 얘기했다는 이유로 답한다
+  note: 스코프 judge 오판 함정
+  src: NEW
+
+- id: c05
+  group: context
+  context:
+    - "오늘 날씨 어때?"
+  q: 그럼 아까 그건?
+  expect: clarify
+  note: 가리키는 대상이 없다. 되묻는 것이 맞다
+  src: NEW
+
+- id: c06
+  group: context
+  context:
+    - "성실성이 뭐야?"
+    - "책임성도 알려줘"
+    - "전략성은?"
+    - "역량 목록 보여줘"
+    - "위계 구조도 알려줘"
+  q: 처음에 물어본 거 다시 설명해줘
+  expect: answer
+  note: 12개 메시지(주고받기 6회) 상한 안에 성실성이 남아 있어야 한다
+  src: NEW
+
+# ─────────────────────────────────────────────────────────────────
+# meta — 인사·기능 안내 (5)
+#
+# m04는 재설계로 의미가 바뀐 케이스다. 능력을 열거하지 않는다.
+# ─────────────────────────────────────────────────────────────────
+
+- id: m01
+  group: meta
+  q: 안녕하세요
+  expect: meta
+  note: 짧은 인사 후 역량 질문 제안
+  src: F13
+
+- id: m02
+  group: meta
+  q: 고마워
+  expect: meta
+  src: F14
+
+- id: m03
+  group: meta
+  q: 너는 누구야?
+  expect: meta
+  src: F15
+
+- id: m04
+  group: meta
+  q: 무엇을 할 수 있어?
+  expect: meta
+  note: >
+    1단계에서 must_not을 정정했다. 모델은 프롬프트에 manifest가 없어도
+    능력 7개를 스스로 열거했고, 그 내용은 레지스트리에서 유도된 사실이었다.
+    v1 manifest의 문제는 열거 자체가 아니라 하드코딩된 목록이 실제 동작과
+    어긋나고(drift) 목록에 없는 질문을 이류로 만든 것(gating)이었다.
+    생성된 서술은 둘 다 하지 않는다. REBUILD_PLAN 3.4 참고
+  must_not: 레지스트리에서 확인되지 않는 기능을 할 수 있다고 말한다
+  src: F16
+
+- id: m05
+  group: meta
+  q: 안녕, 성실성 정의를 알려줘
+  expect: answer
+  note: 인사를 반영하되 역량 답변이 우선이다
+  src: F24
