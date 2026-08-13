@@ -156,6 +156,36 @@ def test_judge_is_called_once_per_attempt(snapshot, monkeypatch) -> None:
     assert judge.calls == 2
 
 
+def test_the_registry_survives_a_long_conversation(snapshot, monkeypatch) -> None:
+    """맨 앞을 통째로 자르면 레지스트리 전문이 먼저 밀려난다.
+
+    프로덕션에서 관측된 결함이다.  ``answer_turn``이 히스토리를 상한까지
+    줄인 뒤 시스템 메시지와 질문을 붙이므로 상한을 넘고, 여기서 다시 앞에서
+    자르면 주고받기 여섯 번 만에 레지스트리 없이 답하게 된다.
+    """
+
+    from langchain_core.messages import SystemMessage
+
+    from chat.models import MESSAGE_LIMIT, ModelRole
+
+    monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_grounded()]))
+    model = _ScriptedModel(["답변"])
+    limit = MESSAGE_LIMIT[ModelRole.ANSWER]
+    long_history = [HumanMessage(content=f"질문{index}") for index in range(limit + 4)]
+
+    run_turn(
+        model,
+        object(),
+        snapshot,
+        [SystemMessage(content="레지스트리 전문"), *long_history],
+    )
+
+    sent = model.seen[0]
+    assert sent[0].content == "레지스트리 전문"
+    assert len(sent) == limit + 1
+    assert sent[-1].content == f"질문{limit + 3}"
+
+
 def test_fallback_without_any_verified_fact_says_so(snapshot) -> None:
     assert render_fallback(None) == FALLBACK_EMPTY
     assert render_fallback(GroundingVerdict(ok=False)) == FALLBACK_EMPTY

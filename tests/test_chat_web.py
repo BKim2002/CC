@@ -176,3 +176,22 @@ def test_stream_failure_becomes_an_error_event(client, monkeypatch) -> None:
 
     assert events["error"]["code"] == "answer_generation_failed"
     assert "내부 오류 상세" not in body
+
+
+def test_startup_logs_the_resolved_model_per_role(caplog) -> None:
+    """배포된 설정이 낡은 것을 로그 한 줄로 알 수 있어야 한다.
+
+    `OPENAI_MODEL` 하나가 네 역할을 모두 덮으므로 그 값이 낡으면 전부 조용히
+    낡는다.  이 줄이 없어서 프로덕션 진단에 재현과 모델 조합 비교가 필요했다.
+    """
+
+    import logging
+
+    from chat.runtime import log_selected_models
+
+    with caplog.at_level(logging.INFO, logger="chat.runtime"):
+        log_selected_models()
+
+    logged = caplog.text
+    assert "answer=" in logged
+    assert "judge=" in logged

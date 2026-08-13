@@ -474,14 +474,18 @@ def check_grounding(
             {"index": span.index, "value": span.value, "context": span.context}
             for span in spans
         ],
+        # 조회 **대상**만 넘기고 조건과 결과는 넘기지 않는다.  이 힌트는
+        # "하위요인은 3가지입니다"처럼 대상이 생략된 문장을 풀라고 넣은
+        # 것이지, 어떤 수를 주장하는지 알려주려고 넣은 것이 아니다.
+        #
+        # 조건과 결과까지 주면 judge가 답변 대신 조회 내역을 읽는다.  작성
+        # 모델은 개수를 셀 때 analysis_included=False를 먼저 던져 보는
+        # 버릇이 있고 그 호출은 0을 돌려준다.  그 0이 프로덕션에서 답변의
+        # 30을 "틀렸다"로 만들고 폴백까지 밀어냈다.
         "lookups": [
-            {
-                "tool": call.name,
-                "arguments": dict(call.arguments),
-                "count": call.result.get("count"),
-                "target": (call.result.get("target") or {}).get("name"),
-            }
+            {"tool": call.name, "target": target}
             for call in tool_calls
+            if (target := (call.result.get("target") or {}).get("name"))
         ],
     }
     structured = judge_model.with_structured_output(JUDGE_SCHEMA)

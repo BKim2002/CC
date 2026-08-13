@@ -55,6 +55,20 @@ class TurnResult:
         return totals
 
 
+def _trimmed(messages: Sequence[Any]) -> list[Any]:
+    """대화만 자르고 시스템 메시지는 남긴다.
+
+    맨 앞을 통째로 자르면 레지스트리 전문이 사라진다.  ``answer_turn``이 이미
+    히스토리를 상한까지 줄인 뒤 시스템 메시지와 질문을 붙이므로, 여기서 다시
+    앞에서부터 자르면 상한을 넘긴 만큼 시스템 메시지가 먼저 밀려난다 --
+    주고받기 여섯 번이면 레지스트리 없이 답하게 된다.
+    """
+
+    system = [item for item in messages if getattr(item, "type", "") == "system"]
+    rest = [item for item in messages if getattr(item, "type", "") != "system"]
+    return [*system, *rest[-MESSAGE_LIMIT[ModelRole.ANSWER] :]]
+
+
 def render_fallback(verdict: GroundingVerdict | None) -> str:
     """도구 결과만으로 답을 만든다. LLM 산문 없이."""
 
@@ -79,7 +93,7 @@ def run_turn(
 
     from langchain_core.messages import HumanMessage
 
-    conversation = list(messages)[-MESSAGE_LIMIT[ModelRole.ANSWER] :]
+    conversation = _trimmed(messages)
     result = TurnResult(text="")
 
     for attempt in range(1, max_attempts + 1):
