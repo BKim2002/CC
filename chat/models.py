@@ -59,14 +59,22 @@ _ROLE_ENV: Mapping[ModelRole, str] = {
     ModelRole.APPEAL: "OPENAI_APPEAL_MODEL",
 }
 
-# 합이 턴 예산 아래여야 한다.  judge는 짧은 구조화 출력이라 상한이 낮아도
-# 된다.  넘으면 부분 답변을 내보내는 대신 실패로 처리한다.
+# 타임아웃은 목표가 아니라 안전망이다.  10초 예산과 같은 숫자를 쓰면 안 된다
+# -- 예산을 넘긴 턴은 느린 것이고, 타임아웃을 넘긴 턴은 죽는 것이다.
+#
+# 처음에 ANSWER를 20초로 잡았는데 5단계 실측에서 전체 위계를 그리는 답변이
+# 23.7초였다.  프로덕션에서 그 질문은 느린 게 아니라 실패한다.  관측된 최댓값
+# 위로 넉넉히 올린다.
 _ROLE_TIMEOUT: Mapping[ModelRole, float] = {
-    ModelRole.ENTRY: 8.0,
-    ModelRole.ANSWER: 20.0,
-    ModelRole.JUDGE: 8.0,
-    ModelRole.APPEAL: 8.0,
+    ModelRole.ENTRY: 15.0,
+    ModelRole.ANSWER: 60.0,
+    ModelRole.JUDGE: 25.0,
+    ModelRole.APPEAL: 25.0,
 }
+
+# 일시적인 지연 하나로 턴 전체를 잃지 않는다.  SDK 재시도는 타임아웃 안에서
+# 일어나므로 예산을 두 배로 늘리지 않는다.
+_MAX_RETRIES = 1
 
 
 def _nonblank(name: str, environ: Mapping[str, str]) -> str | None:
@@ -97,12 +105,12 @@ def create_model(
     model_name: str | None = None,
     timeout: float | None = None,
 ) -> ChatOpenAI:
-    """SDK가 조용히 턴 예산을 넘기지 못하게 재시도를 끄고 상한을 건다."""
+    """역할별 상한을 걸어 SDK가 무한정 기다리지 못하게 한다."""
 
     selected = (model_name or "").strip() or selected_model_name(role)
     return ChatOpenAI(
         model=selected,
-        max_retries=0,
+        max_retries=_MAX_RETRIES,
         timeout=timeout if timeout is not None else _ROLE_TIMEOUT[role],
         use_responses_api=True,
     )

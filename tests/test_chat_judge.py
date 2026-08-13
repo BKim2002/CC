@@ -10,6 +10,8 @@ judge가 아무리 그럴듯하게 말해도 숫자가 틀리면 걸린다.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from chat.judge import (
@@ -233,3 +235,45 @@ class _NeverCalled:
 
 def test_empty_answer_skips_the_judge(snapshot) -> None:
     assert check_grounding(_NeverCalled(), snapshot, "   ").ok
+
+
+# ── judge에게 넘기는 조회 힌트 ────────────────────────────────────────
+
+
+class _CapturingJudge:
+    def __init__(self) -> None:
+        self.payload: dict = {}
+
+    def with_structured_output(self, schema):  # noqa: ANN001
+        return self
+
+    def invoke(self, messages):  # noqa: ANN001
+        self.payload = json.loads(messages[-1].content)
+        return {"numbers": [_number(0, "not_a_claim")], "asserted_names": []}
+
+
+def test_lookup_hints_carry_the_target_but_not_the_result(snapshot) -> None:
+    """조건과 결과까지 주면 judge가 답변 대신 조회 내역을 읽는다.
+
+    프로덕션에서 관측된 결함이다.  작성 모델은 개수를 셀 때
+    ``analysis_included=False``를 먼저 던져 보는 버릇이 있고 그 호출은 0을
+    돌려준다.  그 0이 답변의 30을 "틀렸다"로 만들고 폴백까지 밀어냈다.
+    """
+
+    from chat.answer import ToolCall
+
+    judge = _CapturingJudge()
+    probe = ToolCall(
+        name="count_competencies",
+        arguments={"level": "L3", "analysis_included": False},
+        result={"count": 0, "criteria": {"level": "L3", "analysis_included": False}},
+    )
+    resolved = ToolCall(
+        name="get_relations",
+        arguments={"name": "부모", "relation": "children"},
+        result={"count": 2, "target": {"name": "부모", "level": "L2", "tier": "중위요인"}},
+    )
+
+    check_grounding(judge, snapshot, "하위요인은 2개입니다.", [probe, resolved])
+
+    assert judge.payload["lookups"] == [{"tool": "get_relations", "target": "부모"}]
