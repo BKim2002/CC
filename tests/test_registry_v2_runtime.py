@@ -1,4 +1,11 @@
-"""V2 compiler 결과와 기존 RegistrySnapshot 계약의 통합 회귀 테스트."""
+"""V2 compiler 결과와 RegistrySnapshot 계약의 통합 회귀 테스트.
+
+v1 삭제와 함께 stale-checkpoint 테스트를 뺐다.  그 테스트는
+``competency_interpreter.validate_registry_names``가 오래된 체크포인트에 남은
+삭제된 역량명을 걸러내는지 확인했다.  v2에는 그 함수가 없고, 같은 위험을
+grounding judge가 막는다 -- 답변이 단정한 이름을 **현재** 스냅샷과 대조하므로
+레지스트리에서 사라진 이름은 그 자리에서 걸린다(REBUILD_PLAN 3.2).
+"""
 
 from __future__ import annotations
 
@@ -6,16 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import competency_interpreter
-from competency_query import (
-    ItemField,
-    QueryIntent,
-    RegistryQueryPlan,
-    build_grounded_answer_context,
-    execute_registry_query,
-    render_grounded_fallback,
-)
-from competency_registry import build_registry_snapshot
+from chat.registry import build_registry_snapshot
 from scripts import upload_competency_registry as uploader
 from scripts.registry_compiler import compile_registry
 from scripts.registry_source_v2 import SourceRegistry, render_source_v2
@@ -145,74 +143,3 @@ def test_v2_real_prepare_pipeline_has_no_fixed_62_policy(
 
     assert prepared.item_count == item_count
     assert len(snapshot.canonical_names) == item_count
-
-
-def test_new_v2_snapshot_ignores_stale_checkpoint_names_and_answers_deep_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = SourceRegistry.model_validate(
-        {
-            "source_schema_version": "2.0",
-            "registry_schema_version": "1.0",
-            "instruments": [
-                {
-                    "id": "synthetic",
-                    "label": "합성 검사",
-                    "root_path_prefix": ["가상 검사 루트"],
-                }
-            ],
-            "items": [
-                {
-                    "id": f"stable-{index}",
-                    "name": f"깊이 {index + 1}",
-                    "instrument": "synthetic",
-                    "node_type": "factor",
-                    "parent_id": None if index == 0 else f"stable-{index - 1}",
-                    "order": 10,
-                    "definition": f"깊이 {index + 1} 정의",
-                    "aliases": [],
-                    "analysis_included": index == 4,
-                    "status": "active",
-                    "replacement_id": None,
-                    "notes": [],
-                }
-                for index in range(5)
-            ],
-        },
-        strict=True,
-    )
-    document = compile_registry(
-        source,
-        source_filename="deep-v2.md",
-        source_sha256="c" * 64,
-    )
-    snapshot = build_registry_snapshot(
-        {
-            "id": 20,
-            "source_filename": "deep-v2.md",
-            "source_sha256": "c" * 64,
-            "schema_version": "1.0",
-            "registry_json": document,
-            "item_count": 5,
-        }
-    )
-    monkeypatch.setattr(competency_interpreter, "_registry_snapshot", snapshot)
-
-    # Old checkpoint state can contain names removed by a newer registry.
-    assert competency_interpreter.validate_registry_names(
-        ["삭제된 이전 후보", "깊이 5"]
-    ) == ["깊이 5"]
-
-    plan = RegistryQueryPlan(
-        intent=QueryIntent.ITEM_LOOKUP,
-        user_question="깊이 5의 위계 구조는?",
-        target_ids=["stable-4"],
-        fields=[ItemField.PATH],
-    )
-    result = execute_registry_query(plan, snapshot)
-    context = build_grounded_answer_context(plan, result, snapshot)
-    answer = render_grounded_fallback(context)
-    assert (
-        "등록 경로: 가상 검사 루트 > 깊이 1 > 깊이 2 > 깊이 3 > 깊이 4 > 깊이 5"
-        in answer
-    )

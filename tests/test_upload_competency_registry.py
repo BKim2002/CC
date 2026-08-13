@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from psycopg.types.json import Jsonb
 
-from competency_registry import RegistryValidationError
+from chat.registry import RegistryValidationError
 from scripts import upload_competency_registry as uploader
 from scripts.registry_source_v2 import SourceRegistry, render_source_v2
 

@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:  # pragma: no cover - direct CLI path
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from competency_registry import (  # noqa: E402 - path supports direct scripts
+from chat.registry import (  # noqa: E402 - path supports direct scripts
     RegistryValidationError,
     validate_registry_document,
 )

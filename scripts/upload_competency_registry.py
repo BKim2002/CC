@@ -26,7 +26,7 @@ from scripts.build_registry import RegistryError, build_registry
 from scripts.registry_diff import RegistryDiff, diff_registries
 from scripts.registry_source_v2 import parse_source_v2_text
 
-from competency_registry import validate_registry_document
+from chat.registry import validate_registry_document
 
 
 load_dotenv(PROJECT_ROOT / ".env")

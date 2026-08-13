@@ -3,6 +3,13 @@
 This module deliberately performs no file or database I/O at import time.  The
 application calls :func:`load_active_registry` during runtime initialization
 and keeps the returned snapshot in memory.
+
+Ported from the root ``competency_registry`` with one change: the eagerly built
+``name_catalog`` and ``semantic_catalog`` strings are gone.  Both existed only
+to feed v1 prompts -- the gateway's registered-name list and the semantic
+selector's candidate list -- and both are superseded by
+:func:`chat.prompt.render_registry`, which puts every field of every item in
+front of the model.  Validation, freezing, and the lookups stay verbatim.
 """
 
 from __future__ import annotations
@@ -100,8 +107,6 @@ class RegistrySnapshot:
     lookup: Mapping[str, Mapping[str, Any]]
     canonical_lookup: Mapping[str, Mapping[str, Any]]
     canonical_names: tuple[str, ...]
-    name_catalog: str
-    semantic_catalog: str
     id_lookup: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -355,39 +360,6 @@ def validate_registry_document(document: object) -> dict[str, Any]:
     return validated
 
 
-def _build_name_catalog(
-    canonical_names: tuple[str, ...],
-    canonical_lookup: Mapping[str, Mapping[str, Any]],
-) -> str:
-    lines: list[str] = []
-    for name in canonical_names:
-        aliases = canonical_lookup[name]["aliases"]
-        alias_description = (
-            f" (등록 별칭: {', '.join(aliases)})"
-            if aliases
-            else ""
-        )
-        lines.append(f"- {name}{alias_description}")
-    return "\n".join(lines)
-
-
-def _build_semantic_catalog(
-    canonical_names: tuple[str, ...],
-    canonical_lookup: Mapping[str, Mapping[str, Any]],
-) -> str:
-    lines: list[str] = []
-    for name in canonical_names:
-        item = canonical_lookup[name]
-        definition = item.get("definition") or "독립적인 정의가 제공되어 있지 않음"
-        path = " > ".join(item["path"]) or "위계 정보 없음"
-        lines.append(
-            f"- 이름: {name}\n"
-            f"  정의: {definition}\n"
-            f"  위계: {path}"
-        )
-    return "\n".join(lines)
-
-
 def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
     """Build a validated in-memory snapshot from one database result row."""
 
@@ -469,8 +441,6 @@ def build_registry_snapshot(row: Mapping[str, Any]) -> RegistrySnapshot:
         lookup=lookup,
         canonical_lookup=canonical_lookup,
         canonical_names=canonical_names,
-        name_catalog=_build_name_catalog(canonical_names, canonical_lookup),
-        semantic_catalog=_build_semantic_catalog(canonical_names, canonical_lookup),
         id_lookup=id_lookup,
     )
 
