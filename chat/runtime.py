@@ -18,6 +18,7 @@ v2에서는 그 대부분이 필요 없다.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from contextlib import ExitStack
@@ -27,7 +28,12 @@ from typing import Any, Callable, Iterator
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from chat.models import MESSAGE_LIMIT, ModelRole, create_model
+from chat.models import (
+    MESSAGE_LIMIT,
+    ModelRole,
+    create_model,
+    selected_model_name,
+)
 from chat.prompt import build_system_message
 from chat.registry import RegistrySnapshot, load_active_registry
 from chat.turn import TurnResult, run_turn
@@ -47,8 +53,27 @@ class Runtime:
         self._stack.close()
 
 
+LOGGER = logging.getLogger(__name__)
+
 _runtime: Runtime | None = None
 _runtime_lock = threading.Lock()
+
+
+def log_selected_models() -> None:
+    """기동 시 역할별로 어떤 모델이 잡혔는지 남긴다.
+
+    모델 이름은 비밀이 아니고(비밀은 API 키다), 이 한 줄이 없어서 배포된
+    설정이 낡은 것을 찾는 데 로그 열람과 재현을 여러 번 거쳐야 했다.
+
+    ``OPENAI_MODEL`` 하나가 네 역할을 모두 덮으므로 그 값이 낡으면 전부
+    조용히 낡는다.  판정 모델이 약해지면 답이 틀리는 게 아니라 **맞는 답이
+    검수에서 버려지고 폴백으로 바뀐다** -- 증상이 원인을 가리킨다.
+    """
+
+    LOGGER.info(
+        "선택된 모델: %s",
+        ", ".join(f"{role.value}={selected_model_name(role)}" for role in ModelRole),
+    )
 
 
 def _database_url() -> str:
@@ -81,6 +106,7 @@ def initialize(*, database_url: str | None = None) -> Runtime:
         if _runtime is not None:
             return _runtime
         url = database_url or _database_url()
+        log_selected_models()
         stack = ExitStack()
         try:
             snapshot = load_active_registry(url)
