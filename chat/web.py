@@ -4,11 +4,8 @@
 `static/chat.js`가 그 계약에 맞춰져 있고 잘 동작하므로 건드리지 않는다
 (REBUILD_PLAN 5절 6단계).
 
-달라지는 것은 하나뿐이다.  **`delta` 이벤트를 보내지 않는다.**  검증 후
-공개이므로 검수를 통과하지 않은 토큰은 나가지 않는다(3.5).  대신 `status`로
-진행 단계를 흘려 대기 중 화면이 비어 있지 않게 한다 -- 6절에 미결정으로
-남아 있던 항목이다.  `chat.js`는 이미 `status`와 `done`을 처리하므로
-프런트엔드 변경이 없다.
+`delta`로 1차 답변을 흘리고, 검수가 답을 바꾸면 `replace`로 말풍선을
+교체한다.  `chat.js`가 두 이벤트를 이미 처리하므로 프런트엔드 변경이 없다.
 
 `candidates`도 계약 유지를 위해 남긴다.  v1은 의미 검색 후보를 별도 필드로
 내려보냈지만 v2는 후보를 답변 본문에서 제시한다.  항상 빈 배열이다.
@@ -39,7 +36,7 @@ INDEX_PATH = STATIC_DIR / "index.html"
 
 FAILURE_MESSAGE = "답변을 만드는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
-# v1 `_SSE_EVENT_NAMES`와 같은 집합에서 `delta`만 쓰지 않는다.
+# v1 `_SSE_EVENT_NAMES`와 같은 집합을 쓴다.
 _STREAM_ERROR = {
     "code": "answer_generation_failed",
     "message": FAILURE_MESSAGE,
@@ -92,33 +89,46 @@ def _frame(event: str, payload: Mapping[str, Any]) -> str:
 
 
 async def _stream(request: Request, thread_id: str, message: str) -> AsyncIterator[str]:
-    """검증을 통과한 답변만 내보낸다. 그 전에는 진행 단계만 흘린다."""
+    """1차 답변을 흘리고, 검수가 바꾸면 교체한다.
+
+    검수 모델은 답변 전체를 읽으므로 접두사를 판정할 수 없다.  흘린다는 것은
+    검수 전 텍스트가 보인다는 뜻이고, 그 대신 확정·저장되는 것은 검수를
+    통과한 텍스트뿐이다(REBUILD_PLAN 3.5).
+
+    재작성은 흘리지 않으므로 화면이 바뀌는 것은 최대 한 번이다.
+    """
 
     yield _frame("start", {"thread_id": thread_id})
 
-    stages: asyncio.Queue[str | None] = asyncio.Queue()
+    events: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
-    def on_stage(stage: str) -> None:
-        loop.call_soon_threadsafe(stages.put_nowait, stage)
+    def push(kind: str, payload: str) -> None:
+        loop.call_soon_threadsafe(events.put_nowait, (kind, payload))
 
     task = loop.run_in_executor(
         None,
-        lambda: runtime.answer_turn(thread_id, message, on_stage=on_stage),
+        lambda: runtime.answer_turn(
+            thread_id,
+            message,
+            on_stage=lambda stage: push("status", stage),
+            on_delta=lambda text: push("delta", text),
+        ),
     )
 
     while True:
         if await request.is_disconnected():
             task.cancel()
             return
-        stage_task = asyncio.ensure_future(stages.get())
+        pending = asyncio.ensure_future(events.get())
         done, _ = await asyncio.wait(
-            {stage_task, task}, return_when=asyncio.FIRST_COMPLETED
+            {pending, task}, return_when=asyncio.FIRST_COMPLETED
         )
-        if stage_task in done:
-            yield _frame("status", {"stage": stage_task.result()})
+        if pending in done:
+            kind, payload = pending.result()
+            yield _frame(kind, {"stage": payload} if kind == "status" else {"text": payload})
             continue
-        stage_task.cancel()
+        pending.cancel()
         break
 
     try:
@@ -128,9 +138,19 @@ async def _stream(request: Request, thread_id: str, message: str) -> AsyncIterat
         yield _frame("error", _STREAM_ERROR)
         return
 
-    # 남은 단계 알림을 비운다. 답이 이미 있으므로 내보내지 않는다.
-    while not stages.empty():
-        stages.get_nowait()
+    # 작업이 끝난 뒤 큐에 남은 것을 마저 내보낸다.  마지막 토큰이 여기 남아
+    # 있을 수 있고, 버리면 흘린 텍스트가 최종본과 달라진다.
+    while not events.empty():
+        kind, payload = events.get_nowait()
+        if kind == "delta":
+            yield _frame("delta", {"text": payload})
+
+    streamed = result.streamed
+
+    # 검수가 답을 바꿨으면 말풍선을 통째로 교체한다.  재작성·항소·폴백이
+    # 모두 여기로 모인다.
+    if streamed and streamed != result.text:
+        yield _frame("replace", {"answer": result.text})
 
     yield _frame("done", {"answer": result.text, "candidates": []})
 

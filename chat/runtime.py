@@ -151,11 +151,12 @@ def answer_turn(
     question: str,
     *,
     on_stage: Callable[[str], None] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> TurnResult:
     """한 턴을 실행하고 대화에 보존한다.
 
-    ``on_stage``는 사용자에게 보일 진행 단계를 흘린다.  검증 후 공개라서
-    답이 나오기까지 화면이 비어 있고(3.5), 그 사이를 채울 것이 필요하다.
+    ``on_stage``는 진행 단계를, ``on_delta``는 토큰을 흘린다.  도구를 부르는
+    동안에는 텍스트가 없으므로 단계 표시가 그 자리를 채운다.
     """
 
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -180,6 +181,7 @@ def answer_turn(
         runtime.snapshot,
         prompt,
         appeal_model=runtime.appeal_model,
+        on_delta=on_delta,
     )
 
     # 질문과 답을 함께 붙인다.  답을 만들다 실패하면 질문도 남지 않아,

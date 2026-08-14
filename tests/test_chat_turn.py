@@ -75,6 +75,15 @@ class _ScriptedModel:
         self.seen.append(list(messages))
         return AIMessage(content=self._texts.pop(0))
 
+    def stream(self, messages):  # noqa: ANN001
+        """한 글자씩 흘린다. 합치면 invoke 결과와 같아야 한다."""
+
+        from langchain_core.messages import AIMessageChunk
+
+        self.seen.append(list(messages))
+        for piece in self._texts.pop(0):
+            yield AIMessageChunk(content=piece)
+
 
 class _ScriptedJudge:
     """정해진 판정을 순서대로 돌려준다. check_grounding 대신 주입한다."""
@@ -295,3 +304,63 @@ def test_without_an_appeal_model_nothing_is_appealed(snapshot, monkeypatch) -> N
     )
 
     assert result.appealed is None
+
+
+# ── 스트리밍 (3.5 개정) ──────────────────────────────────────────────
+
+
+def test_only_the_first_attempt_is_streamed(snapshot, monkeypatch) -> None:
+    """재작성을 흘리면 다 쓰인 답이 다른 답으로 바뀌는 것을 보게 된다.
+
+    한 줄 정정보다 훨씬 혼란스러우므로, 재작성은 완성한 뒤 한 번에 교체한다.
+    """
+
+    monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_bad(), _ok()]))
+    seen: list[str] = []
+    model = _ScriptedModel(["9개입니다.", "1개입니다."])
+
+    result = run_turn(
+        model,
+        object(),
+        snapshot,
+        [HumanMessage(content="몇 개?")],
+        on_delta=seen.append,
+    )
+
+    assert result.attempts == 2
+    assert result.text == "1개입니다."
+    # 흘린 것은 1차 시도뿐이고, 재작성본은 한 글자도 나가지 않았다.
+    assert "".join(seen) == "9개입니다."
+    assert result.streamed == "9개입니다."
+
+
+def test_a_passing_answer_streams_exactly_what_it_returns(snapshot, monkeypatch) -> None:
+    monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_ok()]))
+
+    result = run_turn(
+        _ScriptedModel(["1개입니다."]),
+        object(),
+        snapshot,
+        [HumanMessage(content="몇 개?")],
+        on_delta=lambda _text: None,
+    )
+
+    assert result.streamed == result.text
+
+
+def test_a_fallback_differs_from_what_was_streamed(snapshot, monkeypatch) -> None:
+    """폴백도 교체 경로로 모인다."""
+
+    monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_bad(), _bad()]))
+
+    result = run_turn(
+        _ScriptedModel(["9개입니다.", "여전히 9개입니다."]),
+        object(),
+        snapshot,
+        [HumanMessage(content="몇 개?")],
+        on_delta=lambda _text: None,
+    )
+
+    assert result.used_fallback
+    assert result.streamed == "9개입니다."
+    assert result.text != result.streamed

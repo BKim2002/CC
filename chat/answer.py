@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from chat.registry import RegistrySnapshot
 from chat.tools import (
@@ -167,6 +167,25 @@ def message_text(content: Any) -> str:
     return str(content)
 
 
+def _call(bound: Any, conversation: Sequence[Any], on_delta: Any) -> Any:
+    """한 라운드를 호출한다. 흘릴 곳이 있으면 흘리면서 합친다.
+
+    청크를 더해 얻은 메시지는 ``invoke``의 결과와 같은 모양이라 도구 호출과
+    사용량이 그대로 들어 있다.  덕분에 아래 루프가 두 경로를 구분하지 않는다.
+    """
+
+    if on_delta is None:
+        return bound.invoke(list(conversation))
+
+    merged = None
+    for chunk in bound.stream(list(conversation)):
+        merged = chunk if merged is None else merged + chunk
+        piece = message_text(chunk.content)
+        if piece:
+            on_delta(piece)
+    return merged
+
+
 def _usage(response: Any) -> dict[str, int]:
     metadata = getattr(response, "usage_metadata", None) or {}
     return {
@@ -180,11 +199,15 @@ def answer(
     model: Any,
     snapshot: RegistrySnapshot,
     messages: Sequence[Any],
+    on_delta: Callable[[str], None] | None = None,
 ) -> AnswerResult:
     """도구가 붙은 모델을 답이 나올 때까지 부른다.
 
     ``model``은 도구가 바인딩되지 않은 상태로 받는다 -- 바인딩을 여기서
     하므로 호출자가 도구 목록을 알 필요가 없다.
+
+    ``on_delta``가 있으면 토큰을 흘린다.  도구 호출만 하는 라운드는 텍스트가
+    없으므로 아무것도 나가지 않고, 답을 쓰는 마지막 라운드만 흘러간다.
     """
 
     from langchain_core.messages import ToolMessage
@@ -195,7 +218,7 @@ def answer(
     started = time.perf_counter()
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = bound.invoke(conversation)
+        response = _call(bound, conversation, on_delta)
         result.model_rounds += 1
         for key, value in _usage(response).items():
             result.usage[key] += value

@@ -3,8 +3,8 @@
 `static/chat.js`가 v1 계약에 맞춰져 있고 잘 동작한다.  경로·필드·SSE 이벤트
 이름이 그대로인지 확인한다 -- 하나라도 어긋나면 프런트엔드가 조용히 깨진다.
 
-`delta`를 보내지 않는 것만 v1과 다르다.  검수를 통과하지 않은 토큰은 나가지
-않는다(REBUILD_PLAN 3.5).
+1차 답변은 `delta`로 흘리고, 검수가 답을 바꾸면 `replace`로 교체한다.
+확정·저장되는 것은 검수를 통과한 텍스트뿐이다(REBUILD_PLAN 3.5).
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ def client(monkeypatch):
         yield test_client
 
 
-def _turn(text: str) -> TurnResult:
-    return TurnResult(text=text)
+def _turn(text: str, streamed: str | None = None) -> TurnResult:
+    return TurnResult(text=text, streamed=text if streamed is None else streamed)
 
 
 # ── 계약 ─────────────────────────────────────────────────────────────
@@ -115,27 +115,69 @@ def _events(body: str) -> list[tuple[str, dict]]:
     return frames
 
 
-def test_stream_never_emits_delta(client, monkeypatch) -> None:
-    """검수를 통과하지 않은 토큰은 나가지 않는다 (3.5)."""
+def test_stream_emits_the_answer_as_deltas(client, monkeypatch) -> None:
+    def answering(thread_id, message, *, on_stage=None, on_delta=None):
+        if on_delta is not None:
+            on_delta("검증된 ")
+            on_delta("답변")
+        return _turn("검증된 답변")
 
-    monkeypatch.setattr(
-        web.runtime, "answer_turn", lambda *args, **kwargs: _turn("검증된 답변")
-    )
+    monkeypatch.setattr(web.runtime, "answer_turn", answering)
 
     body = client.post(
         "/api/chat/stream", json={"thread_id": str(uuid4()), "message": "질문"}
     ).text
-    names = [name for name, _ in _events(body)]
+    events = _events(body)
+    names = [name for name, _ in events]
 
-    assert "delta" not in names
     assert names[0] == "start"
     assert names[-1] == "done"
+    assert "".join(p["text"] for n, p in events if n == "delta") == "검증된 답변"
+
+
+def test_an_unchanged_answer_is_not_replaced(client, monkeypatch) -> None:
+    """교체가 없어야 화면이 흔들리지 않는다. 대부분의 턴이 이 경로다."""
+
+    def answering(thread_id, message, *, on_stage=None, on_delta=None):
+        if on_delta is not None:
+            on_delta("검증된 답변")
+        return _turn("검증된 답변")
+
+    monkeypatch.setattr(web.runtime, "answer_turn", answering)
+
+    body = client.post(
+        "/api/chat/stream", json={"thread_id": str(uuid4()), "message": "질문"}
+    ).text
+
+    assert "replace" not in [name for name, _ in _events(body)]
+
+
+def test_a_rewritten_answer_replaces_the_streamed_one(client, monkeypatch) -> None:
+    """검수가 반려하면 재작성본으로 말풍선을 통째 바꾼다.
+
+    재작성은 흘리지 않으므로 사용자가 보는 교체는 한 번이다.
+    """
+
+    def answering(thread_id, message, *, on_stage=None, on_delta=None):
+        if on_delta is not None:
+            on_delta("하위요인은 9개입니다.")
+        return _turn("하위요인은 30개입니다.", streamed="하위요인은 9개입니다.")
+
+    monkeypatch.setattr(web.runtime, "answer_turn", answering)
+
+    body = client.post(
+        "/api/chat/stream", json={"thread_id": str(uuid4()), "message": "질문"}
+    ).text
+    events = dict(_events(body))
+
+    assert events["replace"]["answer"] == "하위요인은 30개입니다."
+    assert events["done"]["answer"] == "하위요인은 30개입니다."
 
 
 def test_stream_reports_progress_stages_while_waiting(client, monkeypatch) -> None:
     """대기 중 화면이 비어 있지 않게 한다 (6절 미결정이던 항목)."""
 
-    def answering(thread_id, message, *, on_stage=None):
+    def answering(thread_id, message, *, on_stage=None, on_delta=None):
         if on_stage is not None:
             on_stage("질문을 이해하는 중")
             on_stage("레지스트리를 조회하는 중")

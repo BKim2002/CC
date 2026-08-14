@@ -1,24 +1,24 @@
 """한 턴 — 작성, 검수, 복구.
 
-    작성 LLM → grounding judge → (틀리면 참값 주입 재생성 1회) → 폴백
+    작성 LLM → 검수 모델 → (어긋나면 재작성 1회) → 폴백
 
-검증 후 공개다.  토큰을 흘리지 않는다(REBUILD_PLAN 3.5).  스트리밍은 폭주
-길이 가드로만 쓰는데, 그 가드는 아직 없다 -- 3단계까지 관측된 최장 답변이
-1,462자라 급하지 않다.
+토큰은 1차 시도에서만 흘린다.  검수는 답변 전체를 읽으므로 접두사를 판정할
+수 없고, 그래서 흘리는 순간 검수 전 텍스트가 화면에 보인다(3.5 개정).
+재작성이 필요해지면 흘리지 않고 완성한 뒤 한 번에 교체한다.
 
-재생성은 같은 프롬프트로 다시 부르지 않는다.  그러면 또 틀린다.  judge가
-계산한 **참값을 사실로 주입**해서 다시 쓰게 한다(3.2).  그래도 실패하면
-LLM 산문을 포기하고 도구 결과만으로 렌더링한다.
+확정되고 저장되는 것은 검수를 통과한 텍스트뿐이다.  화면에 잠시 보이는 것과
+대화에 남는 것이 다를 수 있다는 뜻이고, 그 맞바꿈은 반려율이 낮다는 측정에
+근거한다(REBUILD_PLAN 3.5).
 
-v1의 `render_grounded_fallback`(약 200줄)은 이식하지 않았다.  그것은 v1의
-plan/result 모델에 맞춰진 렌더러이고, v2에는 plan이 없다.  대신 확인된
-사실만 나열하는 훨씬 작은 폴백을 쓴다 -- 문장은 밋밋해도 항상 맞다.
+재작성은 같은 프롬프트로 다시 부르지 않는다.  그러면 또 틀린다.  검수 모델이
+무엇이 어긋났는지 문장으로 알려주고 그것을 지시로 넘긴다.  그래도 실패하면
+지어내지 않고 못 만들었다고 말한다.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from chat.answer import AnswerResult, answer
 from chat.judge import GroundingVerdict, check_grounding
@@ -35,6 +35,7 @@ FALLBACK_EMPTY = (
 @dataclass
 class TurnResult:
     text: str
+    streamed: str = ""
     verdict: GroundingVerdict | None = None
     attempts: int = 0
     used_fallback: bool = False
@@ -88,8 +89,17 @@ def run_turn(
     *,
     appeal_model: Any = None,
     max_attempts: int = 2,
+    on_delta: Callable[[str], None] | None = None,
 ) -> TurnResult:
-    """답변 하나를 만들고, 검수하고, 거절이면 한 번 항소한다."""
+    """답변 하나를 만들고, 검수하고, 거절이면 한 번 항소한다.
+
+    ``on_delta``는 **1차 시도에만** 붙는다.  재생성과 항소 재작성은 흘리지
+    않는다 -- 다 쓰인 답이 통째로 다른 답으로 바뀌는 것을 보는 편이 한 줄
+    정정보다 훨씬 혼란스럽다.  눈에 보이는 교체는 최대 한 번이다.
+
+    흘려보낸 텍스트는 ``streamed``에 남는다.  최종본과 다르면 호출부가
+    교체 신호를 보낼 수 있다.
+    """
 
     from langchain_core.messages import HumanMessage
 
@@ -97,10 +107,13 @@ def run_turn(
     result = TurnResult(text="")
 
     for attempt in range(1, max_attempts + 1):
-        written = answer(answer_model, snapshot, conversation)
+        streaming = on_delta if attempt == 1 else None
+        written = answer(answer_model, snapshot, conversation, streaming)
         result.answers.append(written)
         result.attempts = attempt
         result.text = written.text
+        if attempt == 1:
+            result.streamed = written.text
 
         verdict = check_grounding(
             judge_model,
