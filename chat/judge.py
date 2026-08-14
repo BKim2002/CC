@@ -38,6 +38,9 @@ REVIEW_INSTRUCTIONS = """\
 너는 역량 레지스트리 챗봇의 답변을 검수한다. 위 <registry>가 유일한 사실
 근거다. 답변이 레지스트리와 어긋나는 곳이 있는지만 본다.
 
+`역검 종합점수`는 개별 역량이 아니다. 역량의 개수는 <counts>의 `역량`이고,
+`전체 항목`은 거기에 종합점수를 더한 값이다. 답변이 둘을 구분해 말하면 옳다.
+
 어긋난다는 것은 다음 중 하나다.
 
 - 등록되지 않은 이름을 등록된 역량인 것처럼 정의하거나 위계에 놓았다
@@ -119,9 +122,15 @@ class GroundingVerdict:
 def confirmed_counts(snapshot: RegistrySnapshot) -> str:
     """코드가 확정할 수 있는 개수를 검수 모델에 준다."""
 
-    from chat.tools import count_competencies
+    from chat.tools import OVERALL_LEVEL, count_competencies
 
-    parts = [f"전체 항목={count_competencies(snapshot)['count']}"]
+    total = count_competencies(snapshot)["count"]
+    overall = count_competencies(snapshot, level=OVERALL_LEVEL)["count"]
+    parts = [
+        f"역량={total - overall}",
+        f"종합점수={overall}",
+        f"전체 항목(역량+종합점수)={total}",
+    ]
     parts.extend(
         f"{level}={count_competencies(snapshot, level=level)['count']}"
         for level in _COUNT_LEVELS

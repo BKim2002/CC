@@ -15,7 +15,7 @@ docs/REBUILD_PLAN.md 2.2 참고.
 from __future__ import annotations
 
 from chat.registry import RegistrySnapshot
-from chat.tools import VIDEO_TIER_TERMS, WRITTEN_TIER_TERMS
+from chat.tools import OVERALL_LEVEL, VIDEO_TIER_TERMS, WRITTEN_TIER_TERMS
 
 # ─────────────────────────────────────────────────────────────────────
 # 시스템 프롬프트
@@ -51,6 +51,9 @@ SYSTEM_PROMPT = """\
 - 인사와 감사에는 자연스럽게 응대한다.
 - 사용자의 언어로 답한다.
 - **개수를 말할 때는 도구로 확인한다.** 눈으로 세지 않는다.
+- `역검 종합점수`는 전체를 통합한 점수이며 **개별 역량이 아니다.** 역량의
+  개수를 말할 때는 종합점수를 빼고 세고, 종합점수가 함께 있으면 그 사실을
+  따로 밝힌다. 도구가 `breakdown`을 돌려주면 그대로 쓴다.
 - **특정 역량 하나의 부모·자식·조상·후손·형제를 말할 때도 도구로 확인한다.**
   도구가 돌려준 위계 이름(상위요인·중위요인·하위요인 등)을 그대로 쓰고,
   직접 고쳐 부르지 않는다.
@@ -112,6 +115,8 @@ def render_registry(snapshot: RegistrySnapshot) -> str:
 
     for item in snapshot.document["items"]:
         head = f"[{item['name']}]"
+        if item["level"] == OVERALL_LEVEL:
+            head += " (종합점수 — 개별 역량이 아님)"
         if item["aliases"]:
             head += f" (별칭: {', '.join(item['aliases'])})"
         lines.append(head)

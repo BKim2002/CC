@@ -41,6 +41,14 @@ VIDEO_TIER_TERMS: Mapping[str, str] = {
 
 VIDEO_INSTRUMENT_ID = "video_interview"
 
+# `역검 종합점수`는 전체를 통합한 점수이며 개별 역량이 아니다.  레지스트리
+# JSON은 이것을 다른 항목과 같은 포맷으로 담고 있어 구분 없이 세면 62가
+# 나온다.  역량의 개수는 61이고, 62는 거기에 종합점수를 더한 값이다.
+#
+# 최초 구성 때 확정하지 못한 모호성이며 10단계에서 검수 모델이 짚었다.
+# 하드코딩하지 않고 level 값에서 유도한다 -- 레지스트리가 바뀌어도 따라간다.
+OVERALL_LEVEL = "overall"
+
 Relation = Literal["parent", "children", "ancestors", "descendants", "siblings"]
 
 
@@ -176,8 +184,11 @@ def count_competencies(
 ) -> dict[str, Any]:
     """조건에 맞는 등록 항목 수를 센다.
 
-    조건을 그대로 돌려주는 것은 4단계 judge를 위해서다.  숫자만 있으면
-    "이 30은 무엇을 센 것인가"를 나중에 대조할 수 없다.
+    조건을 그대로 돌려주는 것은 나중에 "이 30은 무엇을 센 것인가"를 확인할 수
+    있게 하기 위해서다.
+
+    센 것에 종합점수가 섞여 있으면 역량만의 수를 함께 돌려준다.  섞인 채로
+    하나의 수만 주면 답변이 "역량 62개"라고 말하게 된다 -- 실제 역량은 61개다.
     """
 
     matched = [
@@ -192,12 +203,24 @@ def count_competencies(
         "instrument": instrument,
         "analysis_included": analysis_included,
     }
-    return {
+    result: dict[str, Any] = {
         "count": len(matched),
         "criteria": {key: value for key, value in criteria.items() if value is not None},
         "tier": WRITTEN_TIER_TERMS.get(level or "", None) if level else None,
         "names": [item["name"] for item in matched],
     }
+
+    overall = [item for item in matched if item["level"] == OVERALL_LEVEL]
+    if overall and len(overall) != len(matched):
+        result["breakdown"] = {
+            "competencies": len(matched) - len(overall),
+            "overall_scores": len(overall),
+            "note": (
+                f"이 수에는 종합점수 {len(overall)}개가 포함되어 있다. "
+                f"역량만 세면 {len(matched) - len(overall)}개다."
+            ),
+        }
+    return result
 
 
 def get_relations(

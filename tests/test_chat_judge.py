@@ -177,9 +177,52 @@ def test_confirmed_counts_are_supplied_so_the_reviewer_need_not_count(snapshot) 
 
     counts = confirmed_counts(snapshot)
 
-    assert "전체 항목=3" in counts
     assert "L3=2" in counts
     assert "필기 역량검사=3" in counts
+
+
+def test_confirmed_counts_separate_competencies_from_the_overall_score(snapshot) -> None:
+    """`역검 종합점수`는 개별 역량이 아니다.
+
+    레지스트리가 종합점수를 다른 항목과 같은 포맷으로 담고 있어 구분 없이
+    세면 62가 나온다.  실제 역량은 61개다 -- 10단계에서 확정한 제품 결정이며,
+    숫자를 박지 않고 level 값에서 유도한다.
+    """
+
+    counts = confirmed_counts(_with_overall())
+
+    assert "역량=3" in counts
+    assert "종합점수=1" in counts
+    assert "전체 항목(역량+종합점수)=4" in counts
+
+
+def _with_overall():
+    items = [
+        _item("w:parent", "부모", level="L2"),
+        _item("w:a", "잎A", level="L3"),
+        _item("w:b", "잎B", level="L3"),
+        _item("w:all", "역검 종합점수", level="overall"),
+    ]
+    return build_registry_snapshot(
+        {
+            "id": 10,
+            "source_filename": "synthetic.md",
+            "source_sha256": SOURCE_HASH,
+            "schema_version": "1.0",
+            "registry_json": {
+                "schema_version": "1.0",
+                "source": {
+                    "file": "synthetic.md",
+                    "sha256": SOURCE_HASH,
+                    "encoding": "utf-8",
+                },
+                "rules": {"synthetic": "합성 레지스트리 규칙"},
+                "validation": {"status": "passed", "counts": {"total": len(items)}},
+                "items": items,
+            },
+            "item_count": len(items),
+        }
+    )
 
 
 def test_the_registry_leads_the_review_prompt(snapshot) -> None:
