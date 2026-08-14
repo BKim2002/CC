@@ -85,18 +85,14 @@ class _ScriptedAppeal:
 # ── 거절 감지 ────────────────────────────────────────────────────────
 
 
-def test_an_answer_asserting_nothing_registered_reads_as_a_refusal() -> None:
-    assert looks_like_refusal(GroundingVerdict(ok=True, checked_names=0, checked_numbers=0))
+def test_an_answer_conveying_no_registry_content_reads_as_a_refusal() -> None:
+    assert looks_like_refusal(GroundingVerdict(ok=True, uses_registry=False))
 
 
-def test_an_answer_that_asserted_a_registered_name_is_not_a_refusal() -> None:
-    assert not looks_like_refusal(GroundingVerdict(ok=True, checked_names=1))
-
-
-def test_an_answer_that_asserted_a_number_is_not_a_refusal() -> None:
+def test_an_answer_that_conveyed_registry_content_is_not_a_refusal() -> None:
     """b02처럼 거절하면서도 등록 정보를 준 답변은 항소 대상이 아니다."""
 
-    assert not looks_like_refusal(GroundingVerdict(ok=True, checked_numbers=1))
+    assert not looks_like_refusal(GroundingVerdict(ok=True, uses_registry=True))
 
 
 def test_missing_verdict_does_not_trigger_an_appeal() -> None:

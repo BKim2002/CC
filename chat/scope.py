@@ -81,8 +81,7 @@ def looks_like_refusal(verdict: GroundingVerdict | None) -> bool:
 
     어휘로 판별하지 않는 것이 핵심이다.  "죄송"·"answer할 수 없"을 세기
     시작하면 `scope_response.py`의 500줄이 다시 자란다(REBUILD_PLAN 3.6).
-    grounding 결과는 스키마에서 유도되는 신호다 -- 답변이 등록된 이름이나
-    수를 하나라도 단정했는가.
+    검수 모델이 답변을 읽고 등록 정보를 전달했는지 알려주므로 그것을 쓴다.
 
     인사와 기능 안내도 여기 걸린다.  해롭지 않다 -- 항소심이 "찾을 것 없음"을
     돌려주고 아무 일도 일어나지 않는다.  비용은 호출 한 번이다.
@@ -90,7 +89,7 @@ def looks_like_refusal(verdict: GroundingVerdict | None) -> bool:
 
     if verdict is None:
         return False
-    return verdict.checked_names == 0 and verdict.checked_numbers == 0
+    return not verdict.uses_registry
 
 
 def _conversation_text(messages: Sequence[Any], limit: int) -> str:

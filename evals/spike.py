@@ -218,8 +218,7 @@ def run_case(
             {
                 "ok": result.verdict.ok,
                 "judge_called": result.verdict.judge_called,
-                "checked_numbers": result.verdict.checked_numbers,
-                "checked_names": result.verdict.checked_names,
+                "uses_registry": result.verdict.uses_registry,
                 "findings": [
                     {"kind": f.kind, "detail": f.detail} for f in result.verdict.findings
                 ],

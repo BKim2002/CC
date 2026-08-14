@@ -1,77 +1,90 @@
-"""grounding judge — 주장을 뽑는 것은 judge, 참을 정하는 것은 코드.
+"""검수 모델 — 답변을 분해하지 않고 레지스트리와 대조한다.
 
-배선의 핵심은 **judge에게 판정을 시키지 않는 것**이다.  judge 출력 스키마에
-``matches: bool`` 같은 필드를 두면 그 순간 LLM이 판정자가 되고, 도구를 보지
-않고도 통과시킬 수 있다.  여기서 judge는 "이 숫자가 무엇을 주장하는가"만
-말하고, 그 주장이 참인지는 코드가 레지스트리에서 확인한다.
+이전 구조는 답변을 코드가 판정할 수 있는 형태로 **번역**했다.  숫자 스팬을
+뽑고, judge가 각 숫자를 ``count(level=…)`` 같은 원자 질의로 옮기고, 코드가 그
+질의를 실행해 비교했다.  "LLM은 주장을 옮기고 참·거짓은 코드가 정한다"는
+원칙을 지키려면 그 번역이 필요했다.
 
-    1. 코드: 답변에서 숫자 스팬을 뽑는다 (과검출 허용, 누락만 차단)
-    2. 숫자도 이름도 없으면 judge를 부르지 않는다
-    3. judge: 스팬마다 주장하는 질의를, 이름마다 등록 여부 단정을 반환
-    4. 코드: 질의를 실행해 값을 비교하고 판정한다
-    5. 코드: 스팬 개수와 judge 응답 개수가 다르면 자동 실패
+**그 번역이 위험의 원천이었다.**  31회 실행에서 나온 지적 11건 중 거의 전부가
+검증 실패가 아니라 번역 실패다 -- 성실성의 자식 3을 L3 전체 30으로, 참인
+53·9·62를 "확인 불가"로, 적응 예측 아래 L3 9개를 후손 12개로 옮겼다.  답변은
+맞았고 옮기는 과정이 틀렸다.
 
-REBUILD_PLAN 3.2 참고.
+원인은 하나다.  답변의 숫자는 대부분 **파생값**이다 -- 합(62 = 53 + 9), 단계
+수("2단계 구조"), 부분 집계("적응 예측 아래 L3만 9개").  판정 어휘는 원자
+질의뿐이었고, 파생값의 종류는 표현 방식과 마찬가지로 무한하다.  갈래를 하나씩
+더하는 것은 이전 구현이 무너진 것과 같은 모양이라 그 길로 가지 않는다.
 
-3단계에서 실제로 관측한 실패가 이 층의 존재 이유다 -- 모델이 도구를 부르고도
-그 결과와 무관한 숫자를 답에 썼다.  도구 호출 유무는 근거가 되지 않는다.
+그래서 번역을 없앴다.  검수 모델이 레지스트리 전문과 답변을 그대로 읽는다.
+파생값을 원자 질의로 옮길 필요가 없으므로 옮기다 틀릴 일도 없다.
 
-**이 층을 고치기 전에 읽을 것.**
+**대가를 분명히 한다.**  이 층은 ``grounded`` 판정을 모델이 내린다.  코드가
+확정하던 성질을 잃었고, 모델이 자기 답을 통과시킬 가능성이 열려 있다.  그래서
+``docs/REBUILD_PLAN.md`` 3.9가 이 층에도 그대로 적용된다 -- 실행 기록에서
+실제로 잡아낸 오류를 댈 수 없으면 정교화하지 않고 제거한다.
 
-숫자 검증은 지금까지 참 양성 0건, 오탐 11건이다(31회 실행 기준).  틀린 답을
-한 번도 잡지 못했고 맞는 답만 열한 번 버렸다.  ``python evals/spike.py
---audit`` 으로 현재 수치를 확인한다.
-
-원인은 하나로 모인다.  답변의 숫자는 대부분 **파생값**인데(62 = 53 + 9,
-"2단계 구조", "적응 예측 아래 L3만 9개") 판정 어휘는 원자 질의뿐이다.  그리고
-파생값의 종류는 표현 방식과 마찬가지로 무한하다.
-
-그래서 ``count``/``relation``/``levels`` 옆에 갈래를 하나 더 만드는 것은
-**이전 구현이 무너진 것과 같은 모양이다** -- 무한한 집합을 열거로 덮으려는
-시도다.  ``levels``가 이미 그 첫 패치였다.
-
-고칠 방향은 갈래를 늘리는 쪽이 아니라 줄이는 쪽이다.  이름 검증을 코드로
-옮긴 것(9단계)이 그 예이며, 숫자도 도구가 돌려준 값과 대조하는 쪽으로 옮길
-수 있다.  참 양성이 계속 0이면 이 층 자체를 제거하는 것이 옳다.
+    python evals/spike.py --audit
 """
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
+from chat.prompt import render_registry
 from chat.registry import RegistrySnapshot
-from chat.tools import (
-    VIDEO_TIER_TERMS,
-    WRITTEN_TIER_TERMS,
-    UnknownCompetencyError,
-    count_competencies,
-    get_relations,
-)
 
-# 과검출은 괜찮고 누락만 막으면 된다.  판정은 judge가 아니라 코드가 하므로
-# 무해한 숫자가 섞여도 `not_a_claim`으로 걸러진다.
-_NUMBER = re.compile(r"(?<![\d.,])(\d{1,4})(?![\d])")
+REVIEW_INSTRUCTIONS = """\
+너는 역량 레지스트리 챗봇의 답변을 검수한다. 위 <registry>가 유일한 사실
+근거다. 답변이 레지스트리와 어긋나는 곳이 있는지만 본다.
 
-# 서수 목록 표지(줄 앞의 ``1.``)만 서식으로 본다.  v1 `_is_list_ordinal` 이식.
-_MARKDOWN_NOISE = re.compile(r"^#{1,6}\s")
+어긋난다는 것은 다음 중 하나다.
 
+- 등록되지 않은 이름을 등록된 역량인 것처럼 정의하거나 위계에 놓았다
+- 숫자가 레지스트리에서 실제로 세어지는 값과 다르다
+- 레지스트리에 없는 방법·절차·해석 기준·권고를 사실처럼 제시했다
+- 정의나 관계를 레지스트리와 다르게 말했다
 
-@dataclass(frozen=True)
-class NumberSpan:
-    """답변에 등장한 숫자 하나와 그 주변."""
+어긋나지 않는 것:
 
-    index: int
-    value: int
-    context: str
+- 답변이 짧거나 불친절하거나 목록을 생략한 것. **표현은 검수 대상이 아니다.**
+- 답변이 "등록되어 있지 않다"고 밝힌 이름. 올바른 처리다.
+- 범위 밖 질문을 거절한 것.
+- 레지스트리에 근거가 있고 답변이 그 근거를 정확히 옮긴 경우, 더 자세히 쓸 수
+  있었다는 이유로 반려하지 않는다.
+
+개수를 셀 때는 <counts>의 확정값을 쓴다. 거기 없는 개수만 <registry>의 부모·
+자식 관계로 확인한다. 눈대중으로 세어 답변과 다르다고 하지 않는다.
+
+`grounded`가 false이면 `reason`에 **무엇이 어떻게 다른지** 한 문장으로 적는다.
+그 문장이 그대로 재작성 지시가 되므로, 참값을 알면 함께 적는다.
+
+`uses_registry`는 답변이 등록된 역량 정보를 실제로 전달했는지다. 인사·거절·
+되묻기처럼 등록 사실을 하나도 말하지 않았으면 false다.
+"""
+
+REVIEW_SCHEMA: dict[str, Any] = {
+    "title": "grounding_review",
+    "description": "답변이 레지스트리와 어긋나는지 본다.",
+    "type": "object",
+    "properties": {
+        "grounded": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "uses_registry": {"type": "boolean"},
+    },
+    "required": ["grounded", "reason", "uses_registry"],
+    "additionalProperties": False,
+}
+
+# 검수 모델이 직접 세지 않게 확정값을 준다.  프로토타입에서 62개를 눈으로 세어
+# 61이라 답한 적이 있는데, 공교롭게도 그 61은 '역검 종합점수'를 뺀 수라 오산이
+# 아니라 정당한 구분이었다.  그 모호성은 별도 과제로 남기고, 여기서는 코드가
+# 확정할 수 있는 값을 확정해 준다.
+_COUNT_LEVELS = ("overall", "L1", "L2", "L3", "L4", "factor", "item")
 
 
 @dataclass
 class Finding:
-    """코드가 내린 판정 하나."""
-
     kind: str
     detail: str
     expected: Any = None
@@ -82,422 +95,52 @@ class Finding:
 class GroundingVerdict:
     ok: bool
     findings: list[Finding] = field(default_factory=list)
-    checked_numbers: int = 0
-    checked_names: int = 0
+    uses_registry: bool = False
     judge_called: bool = False
-    facts: dict[str, Any] = field(default_factory=dict)
 
     def retry_hint(self) -> str:
-        """재생성 프롬프트에 넣을 참값.
+        """재생성 프롬프트에 넣을 지시.
 
-        같은 프롬프트로 다시 부르면 또 틀린다.  3.2가 "참값을 사실로 주입해
-        한 번만 재생성한다"고 한 이유다.
-
-        지목한 것만 고치라고 명시한다.  전면 재작성으로 읽히면 맞았던 부분까지
-        버린다 -- 5단계에서 `g05`가 "등록 역량 62개"를 정확히 답하고도 재생성
-        뒤에 "종합점수 1개"라는 좁고 무관한 답으로 흘러갔다.
+        검수 모델의 문장을 그대로 쓴다.  이전 구조에서는 내부 라벨을 조립해
+        넘겼고(``{'level': 'L3'} 항목 수는 30인데…``), 그 문자열이 프로덕션에서
+        답변으로 새어 나갔다.
         """
 
         lines = [
-            "이전 답변에서 아래 항목만 잘못되었다. 그 부분만 고치고 나머지는",
-            "유지한다. 원래 질문에 답하는 것이 우선이며, 답의 범위를 좁히지",
-            "않는다.",
+            "이전 답변에서 아래가 레지스트리와 어긋난다. 그 부분만 고치고",
+            "나머지는 유지한다. 원래 질문에 답하는 것이 우선이며 답의 범위를",
+            "좁히지 않는다.",
             "",
-            "고칠 것:",
         ]
-        for finding in self.findings:
-            lines.append(f"- {finding.detail}")
-        if self.facts:
-            lines.append("")
-            lines.append("확인된 사실 (그대로 쓴다):")
-            for key, value in self.facts.items():
-                lines.append(f"- {key}: {value}")
+        lines.extend(f"- {finding.detail}" for finding in self.findings)
         return "\n".join(lines)
 
 
-def _is_list_ordinal(text: str, match: re.Match[str]) -> bool:
-    """줄 앞의 ``1.`` 표지만 서식으로 본다 (v1 `_is_list_ordinal` 이식)."""
+def confirmed_counts(snapshot: RegistrySnapshot) -> str:
+    """코드가 확정할 수 있는 개수를 검수 모델에 준다."""
 
-    line_start = text.rfind("\n", 0, match.start()) + 1
-    prefix = text[line_start : match.start()]
-    return (
-        not prefix.strip()
-        and match.end() < len(text)
-        and text[match.end()] in {".", ")"}
+    from chat.tools import count_competencies
+
+    parts = [f"전체 항목={count_competencies(snapshot)['count']}"]
+    parts.extend(
+        f"{level}={count_competencies(snapshot, level=level)['count']}"
+        for level in _COUNT_LEVELS
     )
-
-
-def extract_number_spans(text: str, *, window: int = 45) -> list[NumberSpan]:
-    """답변 속 숫자를 빠짐없이 뽑는다.
-
-    서수 목록 표지만 제외한다.  나머지는 전부 judge에게 보내고, 사실 주장이
-    아닌 것은 judge가 ``not_a_claim``으로 표시한다.  여기서 걸러내려 들면
-    v1의 어휘 목록이 다시 자라기 시작한다 (REBUILD_PLAN 3.6).
-    """
-
-    spans: list[NumberSpan] = []
-    for match in _NUMBER.finditer(text):
-        if _is_list_ordinal(text, match):
-            continue
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        if _MARKDOWN_NOISE.match(text[line_start : line_start + 8]):
-            pass  # 제목 줄의 숫자도 주장일 수 있다. 남긴다.
-        start = max(0, match.start() - window)
-        end = min(len(text), match.end() + window)
-        spans.append(
-            NumberSpan(
-                index=len(spans),
-                value=int(match.group(1)),
-                context=text[start:end].replace("\n", " "),
-            )
+    parts.extend(
+        f"{label}={count_competencies(snapshot, instrument=label)['count']}"
+        for label in sorted(
+            {item["instrument_label"] for item in snapshot.document["items"]}
         )
-    return spans
+    )
+    return "<counts>\n" + " · ".join(parts) + "\n</counts>"
 
 
-# judge도 위계 용어를 알아야 한다.  "하위요인"이 L3라는 것은 level 값에서
-# 유도되지 않는 도메인 어휘라, 알려주지 않으면 judge가 엉뚱한 level로 옮기고
-# 코드가 그 잘못된 질의를 성실히 실행한다 -- 4단계 첫 실행에서 "하위요인"이
-# factor로 매핑되어 30이 0으로 판정되었다.  도구·프롬프트와 같은 사전에서
-# 만들어 셋이 갈라질 수 없게 한다.
-_TIER_LINES = "\n".join(
-    [
-        *(f"  {term} = level {level}" for level, term in WRITTEN_TIER_TERMS.items()),
-        *(f"  {term} = level {level} (영상면접)" for level, term in VIDEO_TIER_TERMS.items()),
-    ]
-)
+def review_system_message(snapshot: RegistrySnapshot) -> str:
+    """레지스트리를 맨 앞에 둔다. 작성 쪽과 같은 이유로 캐시 접두가 안정된다."""
 
-JUDGE_SYSTEM_PROMPT = f"""\
-너는 역량 레지스트리 챗봇의 답변을 검수한다. 판정하지 않는다 — 답변이
-무엇을 주장하는지만 구조화해서 옮긴다. 참인지 거짓인지는 다른 곳에서
-확인한다.
-
-위계 용어와 level 값의 대응:
-
-{_TIER_LINES}
-
-주어지는 것:
-
-- 검수 대상 답변
-- 답변에서 기계적으로 추출한 숫자 목록 (서식용 숫자가 섞여 있다)
-- 답변을 쓸 때 실제로 조회한 내역 (없을 수도 있다)
-
-조회 내역은 답변이 무엇에 대해 말하는지 고르는 데 쓴다. 앞선 대화를 볼 수
-없으므로, "하위요인은 3가지입니다"처럼 대상이 생략된 문장은 조회 내역의
-대상을 따른다. 조회했다는 사실 자체는 근거가 되지 않는다 — 조회한 것과
-다른 수를 답에 썼을 수도 있고, 그 판정은 다른 곳에서 한다.
-
-할 일 두 가지.
-
-**1. 숫자마다 그 숫자가 주장하는 질의를 적는다.**
-
-  claim 값:
-  - "count"        전체 또는 조건에 맞는 등록 항목 수를 주장한다
-  - "relation"     특정 역량의 부모·자식·조상·후손·형제 수를 주장한다
-  - "levels"       위계가 몇 단계인지를 주장한다 ("2단계 구조")
-  - "not_a_claim"  서식·순번·인용 등 레지스트리 사실이 아니다
-  - "unsupported"  수량을 단정하지만 위 질의로 표현할 수 없다
-
-  levels이면 instrument를 채운다. 검사를 특정하지 않았으면 비운다.
-
-  count이면 level(overall/L1/L2/L3/L4/factor/item), instrument(필기 역량검사
-  /영상면접), analysis_included 중 답변이 실제로 말한 조건만 채운다. 말하지
-  않은 조건은 비운다.
-
-  relation이면 name과 relation(parent/children/ancestors/descendants/siblings)
-  을 채운다.
-
-  **count와 relation을 가르는 기준은 하나다 — 특정 역량이 기준점인가.**
-  "성실성의 하위요인은 3개", "전략성 아래에 3개"처럼 한 역량을 기준으로 센
-  수는 위계 이름이 들어 있어도 relation이다. count는 기준점 없이 레지스트리
-  전체 또는 한 위계·검사 전체를 셀 때만 쓴다. 대상이 문장에 없으면 조회
-  내역의 대상을 쓴다.
-
-  조건은 답변이 말한 것만 채우고, 말하지 않은 조건을 **추가하지 않는다.**
-  조건이 하나도 없어도 count다 — 조건 없는 count는 레지스트리 전체 수다.
-
-  예시:
-
-    "등록된 역량은 총 62개"        → count, 조건 없음
-    "필기 역량검사: 53개"          → count, instrument=필기 역량검사
-    "하위요인은 30개"              → count, level=L3
-    "필기 역량검사 상위요인 3개"    → count, level=L1, instrument=필기 역량검사
-    "분석에 포함되는 역량 30개"     → count, analysis_included=true
-    "성실성의 하위요인 3개"         → relation, name=성실성, children
-    "전략성 아래 전체 후손 12개"    → relation, name=전략성, descendants
-    "영상면접은 2단계 구조"         → levels, instrument=영상면접
-    목록 표지 "1."                 → not_a_claim
-    "평균 점수는 72점"             → unsupported
-
-  검사 이름만으로 세는 것도, 조건 없이 전체를 세는 것도 count로 표현된다.
-  이런 것을 unsupported로 보내지 않는다.
-
-**2. 답변이 등록된 역량으로 취급한 이름을 적는다.**
-
-  답변이 **주제로 삼아** 다음 중 하나를 한 이름만 적는다.
-
-  - 그 이름의 정의를 제시했다
-  - 그 이름이 어떤 위계 단계(상위요인·하위요인 등)라고 말했다
-  - 그 이름이 다른 역량의 상위나 하위라고 말했다
-
-  적지 않는 것:
-
-  - 목록이나 표의 항목으로 **나열만** 된 이름. 30개를 나열했다면 30개 모두
-    적지 않는다.
-  - 답변이 "등록되어 있지 않다", "등록된 이름이 아니다"라고 **밝힌** 이름.
-    사용자가 물어서 답변이 미등록임을 알려준 경우이며, 올바른 처리다.
-  - 비슷한 이름으로 **제안만** 한 이름.
-
-  등록 여부는 판단하지 않는다. 다른 곳에서 확인한다. 대부분의 답변에서 이
-  목록은 비어 있거나 한둘이다.
-
-추측하지 않는다. 답변이 실제로 말한 것만 옮긴다.
-"""
-
-JUDGE_SCHEMA: dict[str, Any] = {
-    # langchain의 with_structured_output은 raw JSON Schema를 함수로 바꾸므로
-    # 최상위 title이 없으면 ValueError로 거부한다.
-    "title": "grounding_claims",
-    "description": "답변이 주장하는 것을 구조화해서 옮긴다. 판정하지 않는다.",
-    "type": "object",
-    "properties": {
-        "numbers": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "index": {"type": "integer"},
-                    "claim": {
-                        "type": "string",
-                        "enum": ["count", "relation", "levels", "not_a_claim", "unsupported"],
-                    },
-                    "level": {
-                        "type": ["string", "null"],
-                        "enum": ["overall", "L1", "L2", "L3", "L4", "factor", "item", None],
-                    },
-                    "instrument": {
-                        "type": ["string", "null"],
-                        "enum": ["필기 역량검사", "영상면접", None],
-                    },
-                    "analysis_included": {"type": ["boolean", "null"]},
-                    "name": {"type": ["string", "null"]},
-                    "relation": {
-                        "type": ["string", "null"],
-                        "enum": [
-                            "parent",
-                            "children",
-                            "ancestors",
-                            "descendants",
-                            "siblings",
-                            None,
-                        ],
-                    },
-                },
-                "required": [
-                    "index",
-                    "claim",
-                    "level",
-                    "instrument",
-                    "analysis_included",
-                    "name",
-                    "relation",
-                ],
-                "additionalProperties": False,
-            },
-        },
-        "asserted_names": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["numbers", "asserted_names"],
-    "additionalProperties": False,
-}
-
-
-def mentioned_registered_names(
-    text: str,
-    snapshot: RegistrySnapshot,
-) -> list[str]:
-    """답변에 등장한 **등록된** 이름을 코드가 찾는다.
-
-    judge에게 시키던 일이다.  목록 답변 하나에 이름이 40개씩 들어가고 그것을
-    전부 정확히 열거하라는 요구가 판정 실패의 주된 원인이었다 -- 판정 모델만
-    바꿔도 통과율이 9/9에서 5/9로 떨어졌다(REBUILD_PLAN 8단계 D).
-
-    등록 여부는 문자열 대조로 확정된다.  추론이 필요 없으므로 코드가 한다.
-    judge에게는 "목록에 없는 이름을 등록된 것처럼 다뤘는가"라는 작은 판단만
-    남고, 그런 이름은 보통 없거나 하나다.
-    """
-
-    return [label for label in snapshot.lookup if label in text]
-
-
-_RELATION_TERMS: Mapping[str, str] = {
-    "parent": "상위",
-    "ancestors": "조상",
-    "children": "직속 하위",
-    "descendants": "전체 하위",
-    "siblings": "형제",
-}
-
-
-def _count_label(criteria: Mapping[str, Any]) -> str:
-    """사람이 읽을 라벨을 만든다.
-
-    폴백 답변과 재생성 힌트에 그대로 실리므로 dict repr을 쓰면 안 된다 --
-    4단계 첫 실행에서 ``{'level': 'L3'} 항목 수: 30``이 사용자 화면까지
-    나갔다.
-    """
-
-    parts: list[str] = []
-    instrument = criteria.get("instrument")
-    if instrument:
-        parts.append(str(instrument))
-    level = criteria.get("level")
-    if level:
-        term = WRITTEN_TIER_TERMS.get(level) or VIDEO_TIER_TERMS.get(level) or level
-        parts.append(f"{term}({level})")
-    included = criteria.get("analysis_included")
-    if included is not None:
-        parts.append("분석 포함" if included else "분석 제외")
-    if not parts:
-        return "등록 항목 수"
-    return " ".join(parts) + " 수"
-
-
-def _true_value(snapshot: RegistrySnapshot, mapping: Mapping[str, Any]) -> tuple[int | None, str]:
-    """judge가 옮긴 주장을 레지스트리에서 실제로 계산한다."""
-
-    claim = mapping.get("claim")
-    if claim == "count":
-        result = count_competencies(
-            snapshot,
-            level=mapping.get("level"),
-            instrument=mapping.get("instrument"),
-            analysis_included=mapping.get("analysis_included"),
-        )
-        return result["count"], _count_label(result["criteria"])
-    if claim == "relation":
-        name = mapping.get("name") or ""
-        relation = mapping.get("relation") or "children"
-        try:
-            result = get_relations(snapshot, name=name, relation=relation)
-        except UnknownCompetencyError:
-            return None, f"'{name}'은(는) 등록되지 않은 이름"
-        term = _RELATION_TERMS.get(str(relation), str(relation))
-        return result["count"], f"{name}의 {term} 항목 수"
-    if claim == "levels":
-        # 위계 단계 수.  항목이 늘어도 자라지 않는 자료 형태이므로 3.6의
-        # 경계 안쪽이다.  이 갈래가 없으면 "영상면접은 2단계 구조"처럼
-        # 참인 문장이 unsupported로 걸려 답변 전체가 폴백으로 떨어진다.
-        instrument = mapping.get("instrument")
-        levels = {
-            item["level"]
-            for item in snapshot.document["items"]
-            if instrument is None or item["instrument_label"] == instrument
-        }
-        label = f"{instrument} 위계 단계 수" if instrument else "위계 단계 수"
-        return len(levels), label
-    return None, ""
-
-
-def verify(
-    snapshot: RegistrySnapshot,
-    spans: Sequence[NumberSpan],
-    judged: Mapping[str, Any],
-    answer_text: str = "",
-) -> GroundingVerdict:
-    """judge가 옮긴 주장을 코드가 대조한다. 여기서만 참·거짓이 정해진다."""
-
-    verdict = GroundingVerdict(ok=True, judge_called=True)
-    numbers = list(judged.get("numbers", ()))
-
-    # 5. 스팬 개수와 judge 응답 개수가 다르면 자동 실패.  judge가 불편한
-    # 숫자를 조용히 빠뜨리는 경로를 막는다.
-    if len(numbers) != len(spans):
-        verdict.ok = False
-        verdict.findings.append(
-            Finding(
-                kind="incomplete_judgement",
-                detail=(
-                    f"답변의 숫자는 {len(spans)}개인데 판정은 {len(numbers)}개다. "
-                    "하나도 빠지거나 더해지지 않아야 한다."
-                ),
-            )
-        )
-        return verdict
-
-    by_index = {span.index: span for span in spans}
-    for mapping in numbers:
-        index = mapping.get("index")
-        span = by_index.get(index)
-        if span is None:
-            verdict.ok = False
-            verdict.findings.append(
-                Finding(kind="unknown_span", detail=f"존재하지 않는 숫자 index {index}")
-            )
-            continue
-
-        claim = mapping.get("claim")
-        if claim == "not_a_claim":
-            continue
-        if claim == "unsupported":
-            verdict.ok = False
-            verdict.findings.append(
-                Finding(
-                    kind="unsupported_number",
-                    detail=(
-                        f"'{span.value}'을(를) 레지스트리로 확인할 수 없다: "
-                        f"…{span.context}…"
-                    ),
-                    actual=span.value,
-                )
-            )
-            continue
-
-        verdict.checked_numbers += 1
-        truth, label = _true_value(snapshot, mapping)
-        if truth is None:
-            verdict.ok = False
-            verdict.findings.append(
-                Finding(
-                    kind="unverifiable_claim",
-                    detail=f"'{span.value}'의 근거를 조회할 수 없다 ({label}).",
-                    actual=span.value,
-                )
-            )
-            continue
-        if truth != span.value:
-            verdict.ok = False
-            verdict.findings.append(
-                Finding(
-                    kind="wrong_number",
-                    detail=f"{label}은(는) {truth}인데 답변은 {span.value}이라고 했다.",
-                    expected=truth,
-                    actual=span.value,
-                )
-            )
-            verdict.facts[label] = truth
-        else:
-            verdict.facts[label] = truth
-
-    # 등록된 이름은 코드가 찾는다. judge를 거치지 않으므로 빠뜨릴 수 없다.
-    verdict.checked_names = len(mentioned_registered_names(answer_text, snapshot))
-
-    for name in judged.get("asserted_names", ()):
-        cleaned = str(name).strip()
-        if not cleaned:
-            continue
-        # judge가 잘못 지목했을 수 있다. 판정은 코드가 한다.
-        if cleaned in snapshot.lookup:
-            continue
-        verdict.ok = False
-        verdict.findings.append(
-            Finding(
-                kind="unregistered_name",
-                detail=f"'{cleaned}'은(는) 레지스트리에 없는데 등록된 역량처럼 다뤘다.",
-                actual=cleaned,
-            )
-        )
-
-    return verdict
+    return "\n\n".join(
+        [render_registry(snapshot), confirmed_counts(snapshot), REVIEW_INSTRUCTIONS]
+    )
 
 
 def check_grounding(
@@ -506,53 +149,38 @@ def check_grounding(
     answer_text: str,
     tool_calls: Sequence[Any] = (),
 ) -> GroundingVerdict:
-    """답변 하나를 검수한다. 검사할 것이 없으면 모델을 부르지 않는다.
+    """답변 하나를 검수한다.
 
-    ``tool_calls``는 judge가 **대상을 고르는 데만** 쓴다.  대화를 주지 않기로
-    한 3.8의 결정 때문에 "하위요인은 3가지입니다"처럼 대상이 생략된 문장에서
-    judge가 엉뚱한 질의로 옮겼고(4단계 첫 실행의 `c01` 오탐), 조회 내역은
-    대화 추론이 아니라 사실이므로 그 자리를 대신할 수 있다.
-
-    조회 내역이 판정을 대신하지는 않는다.  코드는 judge가 옮긴 질의를 다시
-    실행한다 -- 3단계에서 관측했듯 도구를 부르고도 무관한 수를 쓸 수 있다.
+    ``tool_calls``는 받지만 쓰지 않는다.  호출부 계약을 유지하기 위한 것이고,
+    검수 모델은 답변과 레지스트리만 본다 -- 조회 내역을 주면 답변 대신 그것을
+    읽는다는 것이 이전 구조에서 이미 관측되었다.
     """
 
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    spans = extract_number_spans(answer_text)
-    if not spans and not answer_text.strip():
+    if not answer_text.strip():
         return GroundingVerdict(ok=True)
 
-    payload = {
-        "answer": answer_text,
-        "numbers": [
-            {"index": span.index, "value": span.value, "context": span.context}
-            for span in spans
-        ],
-        # 조회 **대상**만 넘기고 조건과 결과는 넘기지 않는다.  이 힌트는
-        # "하위요인은 3가지입니다"처럼 대상이 생략된 문장을 풀라고 넣은
-        # 것이지, 어떤 수를 주장하는지 알려주려고 넣은 것이 아니다.
-        #
-        # 조건과 결과까지 주면 judge가 답변 대신 조회 내역을 읽는다.  작성
-        # 모델은 개수를 셀 때 analysis_included=False를 먼저 던져 보는
-        # 버릇이 있고 그 호출은 0을 돌려준다.  그 0이 프로덕션에서 답변의
-        # 30을 "틀렸다"로 만들고 폴백까지 밀어냈다.
-        "lookups": [
-            {"tool": call.name, "target": target}
-            for call in tool_calls
-            if (target := (call.result.get("target") or {}).get("name"))
-        ],
-    }
-    structured = judge_model.with_structured_output(JUDGE_SCHEMA)
-    judged = structured.invoke(
+    structured = judge_model.with_structured_output(REVIEW_SCHEMA)
+    reviewed = structured.invoke(
         [
-            SystemMessage(content=JUDGE_SYSTEM_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+            SystemMessage(content=review_system_message(snapshot)),
+            HumanMessage(content=answer_text),
         ]
+    ) or {}
+
+    grounded = bool(reviewed.get("grounded", True))
+    reason = str(reviewed.get("reason") or "").strip()
+    verdict = GroundingVerdict(
+        ok=grounded,
+        uses_registry=bool(reviewed.get("uses_registry", False)),
+        judge_called=True,
     )
-    return verify(
-        snapshot,
-        spans,
-        judged or {"numbers": [], "asserted_names": []},
-        answer_text,
-    )
+    if not grounded:
+        verdict.findings.append(
+            Finding(
+                kind="not_grounded",
+                detail=reason or "레지스트리와 어긋나는 내용이 있다.",
+            )
+        )
+    return verdict
