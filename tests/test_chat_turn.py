@@ -97,8 +97,7 @@ def _bad(detail: str = "하위요인 수는 1인데 답변은 9라고 했다.") 
     return GroundingVerdict(
         ok=False,
         judge_called=True,
-        findings=[Finding(kind="wrong_number", detail=detail, expected=1, actual=9)],
-        facts={"L3 항목 수": 1},
+        findings=[Finding(kind="not_grounded", detail=detail)],
     )
 
 
@@ -124,18 +123,20 @@ def test_a_failing_answer_never_reaches_the_user(snapshot, monkeypatch) -> None:
     assert result.attempts == 2
 
 
-def test_retry_carries_the_true_value_into_the_prompt(snapshot, monkeypatch) -> None:
+def test_retry_carries_the_reviewer_sentence_into_the_prompt(snapshot, monkeypatch) -> None:
     monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_bad(), _ok()]))
     model = _ScriptedModel(["하위요인은 9개입니다.", "하위요인은 1개입니다."])
 
     run_turn(model, object(), snapshot, [HumanMessage(content="몇 개?")])
 
     retry_prompt = model.seen[1][-1].content
-    assert "1인데" in retry_prompt
-    assert "L3 항목 수: 1" in retry_prompt
+    assert "하위요인 수는 1인데 답변은 9라고 했다." in retry_prompt
+    assert "{" not in retry_prompt
 
 
-def test_two_failures_fall_back_to_tool_results_only(snapshot, monkeypatch) -> None:
+def test_two_failures_fall_back_without_inventing_facts(snapshot, monkeypatch) -> None:
+    """질문과 무관한 사실을 나열하느니 못 만들었다고 말한다."""
+
     monkeypatch.setattr("chat.turn.check_grounding", _ScriptedJudge([_bad(), _bad()]))
     model = _ScriptedModel(["9개입니다.", "여전히 9개입니다."])
 
@@ -143,7 +144,7 @@ def test_two_failures_fall_back_to_tool_results_only(snapshot, monkeypatch) -> N
 
     assert result.used_fallback
     assert "9개" not in result.text
-    assert "L3 항목 수: 1" in result.text
+    assert result.text == FALLBACK_EMPTY
 
 
 def test_judge_is_called_once_per_attempt(snapshot, monkeypatch) -> None:
@@ -186,7 +187,7 @@ def test_the_registry_survives_a_long_conversation(snapshot, monkeypatch) -> Non
     assert sent[-1].content == f"질문{limit + 3}"
 
 
-def test_fallback_without_any_verified_fact_says_so(snapshot) -> None:
+def test_fallback_never_lists_internal_labels(snapshot) -> None:
     assert render_fallback(None) == FALLBACK_EMPTY
     assert render_fallback(GroundingVerdict(ok=False)) == FALLBACK_EMPTY
 
@@ -195,13 +196,13 @@ def test_fallback_without_any_verified_fact_says_so(snapshot) -> None:
 
 
 def _refusal() -> GroundingVerdict:
-    """등록 개체를 하나도 주장하지 않은, 통과한 답변 = 실질적 거절."""
+    """등록 정보를 전달하지 않은, 통과한 답변 = 실질적 거절."""
 
-    return GroundingVerdict(ok=True, judge_called=True, checked_names=0, checked_numbers=0)
+    return GroundingVerdict(ok=True, judge_called=True, uses_registry=False)
 
 
 def _grounded() -> GroundingVerdict:
-    return GroundingVerdict(ok=True, judge_called=True, checked_names=1)
+    return GroundingVerdict(ok=True, judge_called=True, uses_registry=True)
 
 
 class _ScriptedAppealModel:

@@ -244,3 +244,38 @@ def test_unknown_name_raises_rather_than_counting_zero(snapshot) -> None:
 
     with pytest.raises(UnknownCompetencyError, match="등록된 이름이나 별칭이 아닙니다"):
         get_relations(snapshot, name="없는역량", relation="children")
+
+
+def test_counting_flags_when_the_overall_score_is_mixed_in() -> None:
+    """`역검 종합점수`는 개별 역량이 아니다.
+
+    레지스트리가 종합점수를 다른 항목과 같은 포맷으로 담고 있어, 구분 없이
+    한 수만 주면 답변이 "역량 62개"라고 말하게 된다.  실제 역량은 61개다 --
+    10단계에서 확정한 제품 결정이며, 숫자를 박지 않고 level에서 유도한다.
+    """
+
+    document = _document()
+    document["items"].append(_item("w:all", "역검 종합점수", level="overall"))
+    document["validation"]["counts"]["total"] = len(document["items"])
+    snapshot = build_registry_snapshot(
+        {
+            "id": 4,
+            "source_filename": "synthetic.md",
+            "source_sha256": SOURCE_HASH,
+            "schema_version": "1.0",
+            "registry_json": document,
+            "item_count": len(document["items"]),
+        }
+    )
+
+    result = count_competencies(snapshot)
+
+    assert result["count"] == 9
+    assert result["breakdown"]["competencies"] == 8
+    assert result["breakdown"]["overall_scores"] == 1
+    assert "61" not in result["breakdown"]["note"]  # 숫자를 박지 않는다
+
+
+def test_counting_stays_quiet_when_no_overall_score_is_involved(snapshot) -> None:
+    assert "breakdown" not in count_competencies(snapshot, level="L3")
+    assert "breakdown" not in count_competencies(snapshot)

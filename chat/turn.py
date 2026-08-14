@@ -26,7 +26,6 @@ from chat.models import MESSAGE_LIMIT, ModelRole
 from chat.registry import RegistrySnapshot
 from chat.scope import AppealResult, appeal, looks_like_refusal
 
-FALLBACK_PREFIX = "확인된 등록 정보만 안내합니다."
 FALLBACK_EMPTY = (
     "요청하신 내용을 등록된 정보로 확인하지 못했습니다. "
     "역량 이름을 알려주시면 등록된 정의와 위계를 안내해 드리겠습니다."
@@ -70,14 +69,15 @@ def _trimmed(messages: Sequence[Any]) -> list[Any]:
 
 
 def render_fallback(verdict: GroundingVerdict | None) -> str:
-    """도구 결과만으로 답을 만든다. LLM 산문 없이."""
+    """두 번 실패하면 지어내지 않고 못 만들었다고 말한다.
 
-    facts = dict(verdict.facts) if verdict else {}
-    if not facts:
-        return FALLBACK_EMPTY
-    lines = [FALLBACK_PREFIX, ""]
-    lines.extend(f"- {label}: {value}" for label, value in facts.items())
-    return "\n".join(lines)
+    이전에는 검수가 확정한 사실을 나열했는데, 질문과 무관한 사실이 나가고
+    내부 라벨이 그대로 노출되었다(``- {'level': 'L3'} 항목 수: 30``).  검수
+    모델은 참값 목록을 만들지 않으므로 나열할 것도 없고, 질문에 답하지 못했다는
+    사실을 그대로 말하는 편이 정직하다.
+    """
+
+    return FALLBACK_EMPTY
 
 
 def run_turn(

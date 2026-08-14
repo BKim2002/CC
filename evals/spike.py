@@ -25,6 +25,7 @@
     python evals/spike.py --run --id g06 --repeat 3   # 판정이 뒤집혔을 때
     python evals/spike.py --run --limit 5
     python evals/spike.py --run --no-tier-glossary
+    python evals/spike.py --audit               # 검증 계층이 뭘 잡았는지
 
 같은 프롬프트로도 판정이 갈린다.  `g06`은 5회 중 4회가 틀린 티어 이름을
 냈고 1회만 맞았다.  한 번의 통과를 통과로 세면 안 되므로, 판정이 뒤집힌
@@ -116,6 +117,44 @@ def auto_verdict(expected: Any, answer: str) -> bool | None:
     return None
 
 
+def audit_findings() -> int:
+    """지금까지의 실행 기록에서 검증 계층이 무엇을 잡았는지 센다.
+
+    "검증 계층은 참 양성으로 자기 존재를 증명한다"는 규칙을 확인 가능하게
+    만든다(docs/REBUILD_PLAN.md).  문단으로만 있는 규칙은 지켜지지 않는다.
+
+    참·거짓 판별은 사람이 한다 -- 지적 하나하나를 읽고 답변이 실제로 틀렸는지
+    봐야 한다.  여기서는 무엇을 몇 번 지적했는지와 그 원문만 모아 준다.
+    """
+
+    records = sorted(RESULTS_DIR.glob("spike-*.jsonl"))
+    if not records:
+        print("실행 기록이 없습니다.")
+        return 0
+
+    counts: dict[str, int] = {}
+    rows: list[tuple[str, str, str, str]] = []
+    for path in records:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            grounding = json.loads(line).get("grounding") or {}
+            case_id = json.loads(line)["id"]
+            for finding in grounding.get("findings", ()):
+                kind = finding["kind"]
+                counts[kind] = counts.get(kind, 0) + 1
+                rows.append((path.stem[-6:], case_id, kind, finding["detail"]))
+
+    print(f"실행 기록 {len(records)}개 · 지적 {len(rows)}건")
+    for kind, count in sorted(counts.items(), key=lambda item: -item[1]):
+        print(f"  {kind:22} {count}")
+    print()
+    print("각 지적이 참 양성인지 직접 확인한다. 답변이 실제로 틀렸는가?")
+    print("참 양성을 댈 수 없는 검증은 정교화하지 말고 제거한다.")
+    print()
+    for stamp, case_id, kind, detail in rows:
+        print(f"  {stamp} {case_id:5} {kind:22} {detail[:88]}")
+    return 0
+
+
 def run_case(
     model: Any,
     judge_model: Any,
@@ -179,8 +218,7 @@ def run_case(
             {
                 "ok": result.verdict.ok,
                 "judge_called": result.verdict.judge_called,
-                "checked_numbers": result.verdict.checked_numbers,
-                "checked_names": result.verdict.checked_names,
+                "uses_registry": result.verdict.uses_registry,
                 "findings": [
                     {"kind": f.kind, "detail": f.detail} for f in result.verdict.findings
                 ],
@@ -332,6 +370,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--id", action="append", default=[], dest="ids", help="케이스 id 필터")
     parser.add_argument("--limit", type=int, default=None, help="앞에서 N건만")
     parser.add_argument(
+        "--audit",
+        action="store_true",
+        help=(
+            "지금까지의 실행 기록에서 검증 계층이 무엇을 지적했는지 센다. "
+            "API를 호출하지 않는다"
+        ),
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -347,6 +393,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="상위/중위/하위요인 용어표를 빼고 돌린다 — level 값만으로 답하는지 본다",
     )
     arguments = parser.parse_args(argv)
+
+    # 감사는 기록만 읽는다. DB도 API도 필요 없다.
+    if arguments.audit:
+        return audit_findings()
 
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
